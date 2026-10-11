@@ -314,21 +314,23 @@ class Harness(unittest.TestCase):
         allowed = {str(code), str(variables)}
         real_stat = Path.stat
         def fake_stat(path, *args, **kwargs):
-            if str(path) in allowed:
+            if str(path) == str(code):
                 return mock.Mock(st_size=4 * 1024 * 1024)
+            if str(path) == str(variables):
+                return mock.Mock(st_size=540672)
             return real_stat(path, *args, **kwargs)
         with mock.patch.object(Path, "is_file", autospec=True,
                                side_effect=lambda path: str(path) in allowed), mock.patch.object(Path, "stat", autospec=True, side_effect=fake_stat):
             self.assertEqual(it.discover_firmware("x86_64", None, None), (code, variables))
 
-    def test_uefi_firmware_requires_matching_code_and_vars_and_uses_copy(self):
+    def test_uefi_firmware_pair_allows_different_sizes_but_rejects_empty_files(self):
         code = self.root / "code.fd"
         vars_file = self.root / "vars.fd"
         code.write_bytes(b"C" * 4096)
-        vars_file.write_bytes(b"V" * 4096)
+        vars_file.write_bytes(b"V" * 540672)
         self.assertEqual(it.discover_firmware("x86_64", str(code), str(vars_file)), (code, vars_file))
-        vars_file.write_bytes(b"short")
-        with self.assertRaisesRegex(ValueError, "equal sizes"):
+        vars_file.write_bytes(b"")
+        with self.assertRaisesRegex(ValueError, "non-empty"):
             it.discover_firmware("x86_64", str(code), str(vars_file))
 
     def test_qemu_profiles_use_the_expected_machine_and_disable_network(self):
