@@ -61,6 +61,62 @@ class Harness(unittest.TestCase):
         self.addCleanup(lambda: os.environ.__setitem__("PATH", self._old_path))
         return exe
 
+    def fake_installer_tools(self, omit: tuple[str, ...] = ()) -> tuple[Path, Path]:
+        bindir = self.root / "fake installer tools"
+        bindir.mkdir(exist_ok=True)
+        xorriso = bindir / "xorriso"
+        xorriso.write_text("#!/usr/bin/env python3\nimport sys\nfrom pathlib import Path\ni=sys.argv.index('-extract')\np=Path(sys.argv[i+2]); p.parent.mkdir(parents=True,exist_ok=True); p.write_bytes(b'fake squashfs')\n",
+                          encoding="utf-8")
+        contents = {
+            "usr/local/bin/calamares": "#!/bin/bash\nexec sudo -n /usr/bin/calamares\n",
+            "usr/share/applications/calamares.desktop": "Exec=/usr/local/bin/calamares\n",
+            "etc/calamares/settings.conf": "sequence:\nbranding: churros\n",
+            "etc/calamares/branding/churros/branding.desc": "Name=ChurrOS\n",
+            "etc/calamares/modules/unpackfs.conf": f'source: "/run/archiso/bootmnt/churros/{self.profile["architecture"]}/airootfs.sfs"\n',
+        }
+        unsquashfs = bindir / "unsquashfs"
+        body = "#!/usr/bin/env python3\nimport sys\nfrom pathlib import Path\n"
+        body += "contents=" + repr(contents) + "\nomit=" + repr(tuple(omit)) + "\n"
+        body += "if '-cat' in sys.argv:\n    sys.stdout.buffer.write(b'calamares-binary')\n    raise SystemExit(0)\n"
+        body += "i=sys.argv.index('-d'); dest=Path(sys.argv[i+1]); files=sys.argv[i+3:]\n"
+        body += "for name in files:\n    if name in omit: continue\n    p=dest/name; p.parent.mkdir(parents=True,exist_ok=True); p.write_text(contents[name])\n    if name=='usr/local/bin/calamares': p.chmod(0o755)\n"
+        unsquashfs.write_text(body, encoding="utf-8")
+        for exe in (xorriso, unsquashfs):
+            exe.chmod(exe.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
+        return xorriso, unsquashfs
+
+    def test_installer_payload_check_confirms_static_files_and_markers_only(self):
+        xorriso, unsquashfs = self.fake_installer_tools()
+        paths = {"xorriso": xorriso, "unsquashfs": unsquashfs}
+        with mock.patch.object(it.shutil, "which", side_effect=lambda name: str(paths[name])):
+            it.validate_installer_payload(self.iso, self.profile,
+                                          it.load_profiles()["installer_payload"], self.reporter, 5)
+        result = next(t for t in self.reporter.tests if t.name == "installer_live_payload")
+        self.assertEqual(result.status, "PASS")
+        self.assertIn("does not run the GUI", result.message)
+        manifest = self.reporter.report_dir / result.log_path
+        self.assertTrue(manifest.is_file())
+        self.assertIn("etc/calamares/settings.conf", manifest.read_text(encoding="utf-8"))
+
+    def test_installer_payload_missing_configuration_is_failure(self):
+        xorriso, unsquashfs = self.fake_installer_tools(("etc/calamares/settings.conf",))
+        paths = {"xorriso": xorriso, "unsquashfs": unsquashfs}
+        with mock.patch.object(it.shutil, "which", side_effect=lambda name: str(paths[name])):
+            it.validate_installer_payload(self.iso, self.profile,
+                                          it.load_profiles()["installer_payload"], self.reporter, 5)
+        result = next(t for t in self.reporter.tests if t.name == "installer_live_payload")
+        self.assertEqual(result.status, "FAIL")
+        self.assertIn("settings.conf", result.message)
+
+    def test_installer_payload_check_is_blocked_without_unsquashfs(self):
+        xorriso, _ = self.fake_installer_tools()
+        with mock.patch.object(it.shutil, "which", side_effect=lambda name: str(xorriso) if name == "xorriso" else None):
+            it.validate_installer_payload(self.iso, self.profile,
+                                          it.load_profiles()["installer_payload"], self.reporter, 5)
+        result = next(t for t in self.reporter.tests if t.name == "installer_live_payload")
+        self.assertEqual(result.status, "BLOCKED")
+        self.assertIn("unsquashfs", result.message)
+
     def test_profile_table_matches_real_architectures_and_modes(self):
         p = it.load_profiles()["profiles"]
         self.assertEqual({n for n in p if n.startswith("x86_64-")}, {

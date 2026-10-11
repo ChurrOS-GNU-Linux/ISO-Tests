@@ -2,7 +2,7 @@
 
 Herramientas de validación estática y pruebas de humo QEMU para ISOs reales de ChurrOS. No construye la distribución ni sustituye `./churros check`, la CI de Rust o los tests internos ya presentes en ChurrOS.
 
-> **Estado de esta entrega:** el código y las pruebas del arnés son locales y ejecutables. No se creó este repositorio en GitHub: el token inspeccionado no tiene permisos de escritura en `ChurrOS-GNU-Linux`. Véase [`docs/audit.md`](docs/audit.md). Ninguna ISO real se declaró validada en este entorno.
+> **Estado de esta entrega:** el repositorio público existe y el PR inicial del arnés fue fusionado. El CI unitario pasó; ninguna arquitectura o edición se considera validada hasta que una ISO real supere las comprobaciones de estructura y arranque. Véase [`docs/audit.md`](docs/audit.md).
 
 ## Qué comprueba
 
@@ -11,6 +11,7 @@ Herramientas de validación estática y pruebas de humo QEMU para ISOs reales de
 - Modos de arranque respaldados por el perfil del proyecto: BIOS/Syslinux y UEFI/GRUB para x86_64; UEFI/GRUB para aarch64. Se exige además la ruta EFI fallback por arquitectura.
 - Si se aporta un checksum de referencia confiable, compara el hash; si no, informa `SKIP` (no convierte el hash calculado en verificación de autenticidad).
 - QEMU sin NIC, sin discos persistentes, en TCG; prueba cada modo declarado y solo aprueba al observar el marcador systemd configurado en la consola serie. El timeout sin marcador es `FAIL`.
+- Con `--check-installer`, extrae el SquashFS y verifica el binario, lanzador y configuración de Calamares; esto no ejecuta la GUI ni realiza una instalación.
 - Informe JSON, salida de herramientas y logs serie/QEMU con estados `PASS`, `FAIL`, `SKIP` y `BLOCKED`.
 
 El marcador actual demuestra que systemd alcanzó un target de arranque en vivo. **No prueba visualmente el escritorio**, la conexión de red, el funcionamiento de todas las aplicaciones ni una instalación completa. Véase [`docs/design.md`](docs/design.md).
@@ -18,7 +19,8 @@ El marcador actual demuestra que systemd alcanzó un target de arranque en vivo.
 ## Requisitos
 
 - Python 3.10+; el código no requiere paquetes Python externos.
-- Para validación completa: `xorriso`.
+- Para validación ISO: `xorriso`.
+- Para comprobar el contenido Calamares: `squashfs-tools` (`unsquashfs`) además de `xorriso`.
 - Para QEMU x86_64: `qemu-system-x86_64`; para aarch64: `qemu-system-aarch64` y firmware AAVMF/UEFI compatible.
 - Para UEFI x86_64: firmware OVMF compatible. El script detecta rutas usuales o acepta rutas explícitas.
 - Espacio temporal para logs y variables UEFI; la ISO permanece de solo lectura y no se monta en el host.
@@ -43,6 +45,13 @@ Validación estática solamente: los arranques aparecerán como `SKIP`, nunca co
 ```bash
 python3 scripts/iso_tests.py ./out/imagen.iso --profile x86_64-niri \
   --no-boot --report-dir artifacts/static
+```
+
+Para añadir una comprobación estática del payload de Calamares dentro de SquashFS (no prueba su interfaz ni instala):
+
+```bash
+python3 scripts/iso_tests.py ./out/imagen.iso --profile x86_64-niri \
+  --no-boot --check-installer --report-dir artifacts/installer-static
 ```
 
 Compara contra un manifiesto publicado que contenga una línea con el **nombre exacto** del ISO:
@@ -110,9 +119,8 @@ python3 -m py_compile scripts/iso_tests.py tests/test_iso_tests.py
 ## Limitaciones actuales
 
 - No hay perfil gráfico visual automatizado; la salida serie comprueba solo un target systemd.
-- No se automatiza Calamares ni una instalación completa en disco virtual; abrir el instalador no prueba instalación.
-- No hay un checksum publicado verificado para la ISO activa en este entorno.
-- QEMU, `xorriso`, firmware y una ISO real no están instalados/disponibles en este sandbox; no se ejecutó ningún boot de ChurrOS aquí.
-- La organización aún no alberga este repositorio; workflows aquí descritos son archivos locales, no workflows activos.
+- No se automatiza el lanzamiento de Calamares ni una instalación completa en disco virtual. `--check-installer` solo examina estáticamente archivos y marcadores del payload live; no prueba la GUI ni la instalación.
+- La prueba de la ISO oficial `ChurrOS-2026.09.24-x86_64-niri-1.2.iso` registró un SHA-256 calculado, pero no autenticado: el índice de checksums disponible es anterior a esa ISO. El informe marca `published_checksum=SKIP`.
+- El resultado de esa ejecución y su evidencia están publicados en [GitHub Actions run 38170422864](https://github.com/ChurrOS-GNU-Linux/ISO-Tests/actions/runs/38170422864): la estructura BIOS/UEFI fue detectada, pero el cargador EFI fallback no apareció; el arranque BIOS agotó el timeout sin el marcador systemd y el arranque UEFI quedó bloqueado por falta de firmware CODE/VARS emparejado. Por tanto, no se declara que el ISO haya arrancado correctamente.
 
 Detalles de auditoría y arquitectura: [`docs/audit.md`](docs/audit.md), [`docs/design.md`](docs/design.md).

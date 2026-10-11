@@ -49,7 +49,7 @@ jobs:
           {
             sudo apt-get update &&
             sudo apt-get install --no-install-recommends -y \
-              xorriso qemu-system-x86 qemu-system-arm ovmf qemu-efi-aarch64
+              xorriso squashfs-tools qemu-system-x86 qemu-system-arm ovmf qemu-efi-aarch64
           } 2>&1 | tee artifacts/iso-test/evidence/dependency-install.log
       - name: Run static checks and QEMU boot profiles
         env:
@@ -59,7 +59,7 @@ jobs:
           ISO_PROFILE: ${{ inputs.profile }}
         run: |
           common=(python3 scripts/iso_tests.py --iso-url "$ISO_URL" --profile "$ISO_PROFILE" \
-            --report-dir artifacts/iso-test --timeout 900)
+            --check-installer --report-dir artifacts/iso-test --timeout 900)
           if [[ -n "$EXPECTED_SHA256" ]]; then
             "${common[@]}" --expected-sha256 "$EXPECTED_SHA256"
           elif [[ "$ALLOW_UNVERIFIED" == "true" ]]; then

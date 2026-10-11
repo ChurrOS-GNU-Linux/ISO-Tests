@@ -2,7 +2,7 @@
 
 ## Límite de responsabilidad
 
-ISO-Tests recibe una ISO ya construida; no modifica ChurrOS ni extrae/root-monta imágenes. QEMU es el único componente que arranca el artefacto. La VM corre en TCG, sin interfaz gráfica visible, sin NIC, sin disco del anfitrión y sin disco de instalación por defecto. Se copian las variables UEFI a un archivo de evidencia temporal y se borran tras el test; el firmware CODE es solo lectura.
+ISO-Tests recibe una ISO ya construida; no modifica ChurrOS ni monta imágenes en el host. Bajo `--check-installer`, `xorriso` extrae solo el SquashFS live a un temporal y `unsquashfs` inspecciona los archivos de Calamares configurados, sin ejecutar código del sistema live. QEMU es el único componente que arranca el artefacto. La VM corre en TCG, sin interfaz gráfica visible, sin NIC, sin disco del anfitrión y sin disco de instalación por defecto. Se copian las variables UEFI a un archivo de evidencia temporal y se borran tras el test; el firmware CODE es solo lectura.
 
 Las llamadas a herramientas usan vectores `argv` sin shell, entorno mínimo sin variables secretas, logs limitados, timeout y terminación del grupo de procesos. Un timeout sin marcador no es éxito. Los tests unitarios mockean procesos exclusivamente para comprobar el comportamiento del arnés; esos resultados no cuentan como arranque.
 
@@ -31,13 +31,19 @@ El perfil refleja solo los modos declarados por `profiledef.sh`; BIOS aarch64 se
 
 **Alcance de la evidencia:** el marcador confirma que el kernel arrancó y systemd alcanzó uno de esos targets; no confirma que el compositor o greeter funcione visualmente. Esta evidencia mínima es verificable desde la configuración serie presente en GRUB upstream. Está pendiente comparar en QEMU real que las versiones actuales de systemd/QEMU impriman el patrón en el log; de no aparecer, se debe actualizar el mecanismo de señal con evidencia del sistema, no relajar a “QEMU siguió vivo”. Una prueba de escritorio necesitaría captura/control de pantalla con aserciones visibles y perfiles de edición.
 
-### C. Instalador
+### C. Payload estático del instalador
 
-No se ejecuta Calamares en esta versión. ChurrOS tiene configuración propia de Calamares y un checklist de instalación manual, pero una instalación satisfactoria requiere configurar un disco virtual desechable, confirmar la ruta de módulos, bootloader por arquitectura, instalación sin red, resultados instalados y segundo arranque. La GUI de escritorio de este entorno no se valida por serie. Solo abrir Calamares no se reportaría como instalación. La etapa queda pendiente hasta que haya una VM visualmente controlable y logs observables; nunca se adjuntan discos físicos.
+Con `--check-installer`, la prueba toma de `profiles/churros.json` la ruta del SquashFS live (`/churros/{architecture}/airootfs.sfs`), coherente con `install_dir="churros"` y `airootfs_image_type="squashfs"` en el perfil Archiso upstream. `xorriso` extrae ese archivo a un directorio temporal; no monta la ISO ni ejecuta el sistema live. `unsquashfs` comprueba que puede leer el payload `usr/bin/calamares`, extrae solo los archivos de texto declarados y valida sus marcadores esperados: lanzador live, entrada `.desktop`, ajustes y configuración de módulos.
 
-### D. Pruebas del arnés
+`installer_live_payload=PASS` acredita únicamente la presencia legible de esos archivos y los marcadores configurados. No comprueba que el ejecutable sea compatible con las bibliotecas del sistema, que permisos/polkit permitan iniciarlo, que la GUI abra ni que una instalación pueda completarse. Las rutas y marcadores se basan en el árbol de build upstream inspeccionado; una compilación puede omitir Calamares si no está disponible durante el build. Si faltan herramientas el estado es `BLOCKED`; sin `--check-installer`, se registra `SKIP`.
 
-`tests/test_iso_tests.py` crea fixtures sintéticos temporales (nombres arbitrarios con espacios, descriptor aislado no booteable), ejecutables falsos para xorriso/QEMU y firmware falso para comprobar robustez. Comprueba artefactos ausentes/vacíos/corruptos, falta de herramientas, perfiles/modos inválidos, entradas de catálogo, ruta EFI, checksum, timeout, errores de QEMU, informe incompleto/estados, manejo de nombres con espacios, terminación de procesos e interrupción/limpieza de descarga. **No usa ni representa una ISO real.**
+### D. Lanzamiento de Calamares e instalación
+
+No se lanza Calamares ni se instala ChurrOS. La validación completa sigue pendiente: necesita una VM visualmente controlable con un disco virtual desechable, y debe comprobar ruta de módulos, bootloader por arquitectura, instalación sin red, estado del sistema instalado y segundo arranque. La GUI de escritorio no se valida por serie. Abrir Calamares por sí solo tampoco equivaldría a una instalación satisfactoria; nunca se adjuntan discos físicos.
+
+### E. Pruebas del arnés
+
+`tests/test_iso_tests.py` crea fixtures sintéticos temporales (nombres arbitrarios con espacios, descriptor aislado no booteable), ejecutables falsos para xorriso/QEMU y firmware falso para comprobar robustez. Incluye fixtures de SquashFS simulados para verificar únicamente la lógica del chequeo estático del payload. Comprueba artefactos ausentes/vacíos/corruptos, falta de herramientas, perfiles/modos inválidos, entradas de catálogo, ruta EFI, checksum, timeout, errores de QEMU, informe incompleto/estados, manejo de nombres con espacios, terminación de procesos e interrupción/limpieza de descarga. **Los fixtures unitarios no usan ni representan la ISO oficial; la prueba estática de fixtures tampoco es evidencia de que un ISO real contenga Calamares.**
 
 ## Informes
 

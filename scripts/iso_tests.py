@@ -14,6 +14,7 @@ import os
 import re
 import signal
 import shutil
+import stat
 import subprocess
 import sys
 import tempfile
@@ -148,6 +149,23 @@ def load_profiles(path: Path = DEFAULT_PROFILES) -> dict[str, Any]:
                 re.compile(pattern)
             except (TypeError, re.error) as e:
                 raise ValueError(f"profile {name!r}: invalid success pattern: {e}") from e
+    installer = data.get("installer_payload")
+    if installer is not None:
+        if not isinstance(installer, dict):
+            raise ValueError("installer_payload must be an object")
+        template = installer.get("rootfs_iso_template")
+        if not isinstance(template, str) or "{architecture}" not in template or not template.startswith("/"):
+            raise ValueError("installer_payload.rootfs_iso_template must be an absolute path with {architecture}")
+        files = installer.get("required_files")
+        if not isinstance(files, list) or not files or any(
+                not isinstance(f, str) or f.startswith("/") or ".." in Path(f).parts for f in files):
+            raise ValueError("installer_payload.required_files must contain safe relative paths")
+        markers = installer.get("text_markers", {})
+        if not isinstance(markers, dict) or any(
+                key not in files or not isinstance(values, list) or not values or
+                any(not isinstance(value, str) or not value for value in values)
+                for key, values in markers.items()):
+            raise ValueError("installer_payload.text_markers must map required files to non-empty strings")
     return data
 
 
@@ -209,6 +227,33 @@ def run_command(argv: list[str], timeout: float, log_path: Path) -> tuple[int | 
         raise
     finally:
         _ = started
+
+
+def run_command_discard_stdout(argv: list[str], timeout: float, log_path: Path) -> tuple[int | None, str | None]:
+    """Run a command while discarding potentially large stdout, retaining only stderr."""
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    proc: subprocess.Popen[bytes] | None = None
+    try:
+        proc = subprocess.Popen(argv, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                                stderr=subprocess.PIPE, env=command_env(), start_new_session=True)
+        try:
+            _, stderr = proc.communicate(timeout=timeout)
+        except subprocess.TimeoutExpired:
+            _kill_process_group(proc)
+            _, stderr = proc.communicate()
+            _write_output(log_path, stderr or b"")
+            return None, f"command timed out after {timeout:g}s"
+        _write_output(log_path, stderr or b"")
+        return proc.returncode, None
+    except OSError as e:
+        message = f"could not execute {argv[0]!r}: {e}"
+        log_path.write_text(message + "\n", encoding="utf-8")
+        return None, message
+    except BaseException:
+        if proc is not None and proc.poll() is None:
+            _kill_process_group(proc)
+            proc.communicate()
+        raise
 
 
 def _kill_process_group(proc: subprocess.Popen[bytes]) -> None:
@@ -430,6 +475,89 @@ def validate_iso(iso: Path, profile_name: str, profile: dict[str, Any], reporter
     return digest, tool_versions
 
 
+def validate_installer_payload(iso: Path, profile: dict[str, Any], spec: dict[str, Any] | None,
+                               reporter: Reporter, timeout: float) -> None:
+    started = time.monotonic()
+    if not isinstance(spec, dict):
+        reporter.add("installer_live_payload", "SKIP", "No installer payload expectation configured", started)
+        return
+    xorriso, unsquashfs = shutil.which("xorriso"), shutil.which("unsquashfs")
+    if not xorriso or not unsquashfs:
+        missing = [name for name, path in (("xorriso", xorriso), ("unsquashfs", unsquashfs)) if not path]
+        reporter.add("installer_live_payload", "BLOCKED",
+                     f"required inspection tool(s) unavailable: {', '.join(missing)}", started)
+        return
+    architecture = profile["architecture"]
+    try:
+        image_path = spec["rootfs_iso_template"].format(architecture=architecture)
+        required = spec["required_files"]
+        markers = spec.get("text_markers", {})
+        if not image_path.startswith("/") or ".." in Path(image_path).parts:
+            raise ValueError("unsafe live rootfs image path in profile")
+        if "usr/bin/calamares" not in required:
+            raise ValueError("installer payload must require usr/bin/calamares")
+        text_files = [p for p in required if p != "usr/bin/calamares"]
+        with tempfile.TemporaryDirectory(prefix=".installer-payload-", dir=reporter.report_dir) as temp:
+            work = Path(temp)
+            squashfs = work / "airootfs.sfs"
+            iso_log = reporter.evidence_dir / "installer-rootfs-xorriso.log"
+            rc, output, err = run_command(
+                [xorriso, "-osirrox", "on", "-indev", str(iso), "-extract", image_path, str(squashfs)],
+                timeout, iso_log)
+            if err or rc != 0 or not squashfs.is_file() or squashfs.stat().st_size == 0:
+                message = err or (f"xorriso exited with status {rc}" if rc else
+                                  f"live rootfs image {image_path} was not extracted")
+                reporter.add("installer_live_payload", "FAIL", message, started, iso_log)
+                return
+
+            binary_log = reporter.evidence_dir / "installer-calamares-binary-probe.log"
+            rc, err = run_command_discard_stdout(
+                [unsquashfs, "-no-progress", "-cat", str(squashfs), "usr/bin/calamares"], timeout, binary_log)
+            if err or rc != 0:
+                message = err or f"usr/bin/calamares missing from live rootfs (unsquashfs exit {rc})"
+                reporter.add("installer_live_payload", "FAIL", message, started, binary_log)
+                return
+
+            extracted = work / "files"
+            extract_log = reporter.evidence_dir / "installer-payload-unsquashfs.log"
+            rc, output, err = run_command(
+                [unsquashfs, "-no-progress", "-d", str(extracted), str(squashfs), *text_files],
+                timeout, extract_log)
+            if err or rc != 0:
+                reporter.add("installer_live_payload", "FAIL",
+                             err or f"unsquashfs exited with status {rc}", started, extract_log)
+                return
+            manifest: list[str] = ["usr/bin/calamares: readable by unsquashfs -cat"]
+            for relative in text_files:
+                candidate = extracted / relative
+                try:
+                    mode = candidate.lstat().st_mode
+                    if not stat.S_ISREG(mode):
+                        raise ValueError("not a regular file")
+                    if candidate.stat().st_size > 1024 * 1024:
+                        raise ValueError("text/config file exceeds 1 MiB inspection limit")
+                    content = candidate.read_text(encoding="utf-8", errors="replace")
+                except (OSError, ValueError) as e:
+                    reporter.add("installer_live_payload", "FAIL",
+                                 f"required live file {relative} missing or invalid: {e}", started, extract_log)
+                    return
+                expected_markers = markers.get(relative, [])
+                missing = [marker.format(architecture=architecture) for marker in expected_markers
+                           if marker.format(architecture=architecture) not in content]
+                if missing:
+                    reporter.add("installer_live_payload", "FAIL",
+                                 f"{relative} lacks expected marker(s): {', '.join(missing)}", started, extract_log)
+                    return
+                manifest.append(f"{relative}: {candidate.stat().st_size} bytes; required markers present")
+            manifest_path = reporter.evidence_dir / "installer-payload-manifest.txt"
+            manifest_path.write_text("\n".join(manifest) + "\n", encoding="utf-8")
+            reporter.add("installer_live_payload", "PASS",
+                         "Calamares binary, live launcher, desktop entry and configuration are present; this does not run the GUI or install ChurrOS",
+                         started, manifest_path)
+    except (OSError, KeyError, ValueError) as e:
+        reporter.add("installer_live_payload", "FAIL", str(e), started)
+
+
 def _qemu_args(profile: dict[str, Any], mode: str, iso: Path, serial_log: Path,
                firmware: tuple[Path, Path] | None, vars_copy: Path) -> list[str]:
     qemu = shutil.which(profile["qemu"]) or profile["qemu"]
@@ -613,6 +741,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--profiles", type=Path, default=DEFAULT_PROFILES, help=argparse.SUPPRESS)
     parser.add_argument("--mode", choices=("all", "bios", "uefi"), default="all")
     parser.add_argument("--no-boot", action="store_true", help="run static checks only; boot checks are explicitly SKIP")
+    parser.add_argument("--check-installer", action="store_true",
+                        help="inspect the SquashFS for the Calamares live payload; does not run the installer")
     parser.add_argument("--report-dir", type=Path, default=Path("artifacts"), help="JSON report and diagnostic output directory")
     parser.add_argument("--timeout", type=float, default=600, help="per QEMU boot timeout in seconds (max 1800)")
     parser.add_argument("--xorriso-timeout", type=float, default=120, help="per xorriso command timeout in seconds")
@@ -696,6 +826,12 @@ def main(argv: list[str] | None = None) -> int:
         digest, tool_versions = validate_iso(iso, args.profile, profile, reporter,
                                              args.expected_sha256,
                                              args.sha256sums, args.xorriso_timeout)
+        if args.check_installer:
+            validate_installer_payload(iso, profile, profile_data.get("installer_payload"),
+                                       reporter, args.xorriso_timeout)
+            tool_versions["unsquashfs"] = _tool_version("unsquashfs")
+        else:
+            reporter.add("installer_live_payload", "SKIP", "Installer payload inspection not requested", time.monotonic())
         artifact["sha256"] = digest
         tool_versions[profile["qemu"]] = _tool_version(profile["qemu"])
         if args.no_boot:
