@@ -262,6 +262,19 @@ class Harness(unittest.TestCase):
         self.assertEqual(digest, hashlib.sha256(payload).hexdigest())
         self.assertEqual(dst.read_bytes(), payload)
 
+    def test_unverified_download_rejects_cross_host_redirect_and_cleans_partial_file(self):
+        payload = b"redirected content"
+        response = mock.MagicMock()
+        response.__enter__.return_value = response
+        response.geturl.return_value = "https://other.example/image.iso"
+        response.headers = {"Content-Length": str(len(payload))}
+        response.read.side_effect = [payload, b""]
+        dst = self.root / "redirected.iso"
+        with mock.patch.object(it.urllib.request, "urlopen", return_value=response):
+            with self.assertRaisesRegex(ValueError, "different HTTPS host"):
+                it.download_iso("https://official.example/image.iso", dst, None, 1)
+        self.assertFalse(dst.exists())
+
     def test_download_url_requires_hash_or_explicit_unverified_opt_in(self):
         report_dir = self.root / "no hash report"
         rc = it.main(["--iso-url", "https://example.invalid/image.iso", "--profile", "x86_64-niri",
