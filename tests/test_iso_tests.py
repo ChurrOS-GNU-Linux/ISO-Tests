@@ -212,6 +212,33 @@ class Harness(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "equal sizes"):
             it.discover_firmware("x86_64", str(code), str(vars_file))
 
+    def test_qemu_profiles_use_the_expected_machine_and_disable_network(self):
+        x86 = self._qemu_profile(("bios", "uefi"))
+        x86_args = it._qemu_args(x86, "bios", self.iso, self.root / "serial log.txt", None, self.root / "vars.fd")
+        self.assertIn("q35,accel=tcg", x86_args)
+        self.assertIn("-nic", x86_args)
+        self.assertEqual(x86_args[x86_args.index("-nic") + 1], "none")
+        self.assertIn(str(self.iso), x86_args)
+        self.assertFalse(any("qcow2" in arg or "host_device" in arg for arg in x86_args))
+        arm = it.load_profiles()["profiles"]["aarch64-niri"]
+        code, vars_template = self.root / "AAVMF_CODE.fd", self.root / "AAVMF_VARS.fd"
+        code.write_bytes(b"C" * 4096)
+        vars_template.write_bytes(b"V" * 4096)
+        arm_args = it._qemu_args(arm, "uefi", self.iso, self.root / "serial.log",
+                                 (code, vars_template), self.root / "temporary-vars.fd")
+        self.assertIn("virt,accel=tcg", arm_args)
+        self.assertIn("cortex-a72", arm_args)
+        self.assertEqual(arm_args[arm_args.index("-nic") + 1], "none")
+        self.assertTrue(any("readonly=on" in arg and str(self.iso) in arg for arg in arm_args))
+        self.assertEqual(vars_template.read_bytes(), b"V" * 4096)
+
+    def test_report_url_redaction_drops_query_and_fragment(self):
+        url = "https://downloads.example/churros.iso?token=private-value&sig=secret#fragment"
+        safe = it.safe_source_url(url)
+        self.assertEqual(safe, "https://downloads.example/churros.iso")
+        self.assertNotIn("private-value", safe)
+        self.assertNotIn("secret", safe)
+
     def test_remote_download_requires_https_and_checksum_and_cleans_mismatch(self):
         dst = self.root / "download.iso"
         with self.assertRaisesRegex(ValueError, "HTTPS"):
