@@ -2,15 +2,16 @@
 
 Herramientas de validación estática y pruebas de humo QEMU para ISOs reales de ChurrOS. No construye la distribución ni sustituye `./churros check`, la CI de Rust o los tests internos ya presentes en ChurrOS.
 
-> **Estado de esta entrega:** el código y las pruebas del arnés son locales y ejecutables. No se creó este repositorio en GitHub: el token inspeccionado no tiene permisos de escritura en `ChurrOS-GNU-Linux`. Véase [`docs/audit.md`](docs/audit.md). Ninguna ISO real se declaró validada en este entorno.
+> **Estado de esta entrega:** el repositorio público existe y el PR inicial del arnés fue fusionado. El CI unitario pasó; ninguna arquitectura o edición se considera validada hasta que una ISO real supere las comprobaciones de estructura y arranque. Véase [`docs/audit.md`](docs/audit.md).
 
 ## Qué comprueba
 
 - Archivo normal, presente, no vacío y de 64 MiB a 16 GiB; SHA-256 calculado.
 - Firma del descriptor primario ISO9660 (`CD001`, bloque lógico 16); `xorriso` examina el catálogo El Torito, el área de sistema y el árbol de archivos.
-- Modos de arranque respaldados por el perfil del proyecto: BIOS/Syslinux y UEFI/GRUB para x86_64; UEFI/GRUB para aarch64. Se exige además la ruta EFI fallback por arquitectura.
+- Modos de arranque respaldados por el perfil: BIOS/Syslinux y UEFI/GRUB en x86_64; UEFI/GRUB en aarch64. Verifica el mecanismo UEFI declarado (incluido El Torito embebido) y requiere que la configuración de cada modo pase `console=<serial_device>` antes de confiar en marcadores por serie.
 - Si se aporta un checksum de referencia confiable, compara el hash; si no, informa `SKIP` (no convierte el hash calculado en verificación de autenticidad).
 - QEMU sin NIC, sin discos persistentes, en TCG; prueba cada modo declarado y solo aprueba al observar el marcador systemd configurado en la consola serie. El timeout sin marcador es `FAIL`.
+- Con `--check-installer`, extrae el SquashFS y verifica el binario, lanzador y configuración de Calamares; esto no ejecuta la GUI ni realiza una instalación.
 - Informe JSON, salida de herramientas y logs serie/QEMU con estados `PASS`, `FAIL`, `SKIP` y `BLOCKED`.
 
 El marcador actual demuestra que systemd alcanzó un target de arranque en vivo. **No prueba visualmente el escritorio**, la conexión de red, el funcionamiento de todas las aplicaciones ni una instalación completa. Véase [`docs/design.md`](docs/design.md).
@@ -18,7 +19,8 @@ El marcador actual demuestra que systemd alcanzó un target de arranque en vivo.
 ## Requisitos
 
 - Python 3.10+; el código no requiere paquetes Python externos.
-- Para validación completa: `xorriso`.
+- Para validación ISO: `xorriso`.
+- Para comprobar el contenido Calamares: `squashfs-tools` (`unsquashfs`) además de `xorriso`.
 - Para QEMU x86_64: `qemu-system-x86_64`; para aarch64: `qemu-system-aarch64` y firmware AAVMF/UEFI compatible.
 - Para UEFI x86_64: firmware OVMF compatible. El script detecta rutas usuales o acepta rutas explícitas.
 - Espacio temporal para logs y variables UEFI; la ISO permanece de solo lectura y no se monta en el host.
@@ -43,6 +45,13 @@ Validación estática solamente: los arranques aparecerán como `SKIP`, nunca co
 ```bash
 python3 scripts/iso_tests.py ./out/imagen.iso --profile x86_64-niri \
   --no-boot --report-dir artifacts/static
+```
+
+Para añadir una comprobación estática del payload de Calamares dentro de SquashFS (no prueba su interfaz ni instala):
+
+```bash
+python3 scripts/iso_tests.py ./out/imagen.iso --profile x86_64-niri \
+  --no-boot --check-installer --report-dir artifacts/installer-static
 ```
 
 Compara contra un manifiesto publicado que contenga una línea con el **nombre exacto** del ISO:
@@ -94,7 +103,7 @@ Un estado `BLOCKED` nunca equivale a éxito. Si falta `xorriso`, QEMU o firmware
 ## GitHub Actions
 
 - `unit-tests.yml`: tests del arnés en cada pull request; permiso `contents: read`.
-- `iso-smoke.yml`: ejecución manual (`workflow_dispatch`) con URL HTTPS y perfil; acepta SHA-256 confiable o requiere marcar explícitamente la opción de descarga sin checksum. En este último caso el checksum queda `SKIP`; instala `xorriso`, QEMU y firmware, conserva informe y logs aun si falla.
+- `iso-smoke.yml`: ejecución manual (`workflow_dispatch`) con URL HTTPS y perfil; acepta SHA-256 confiable o requiere marcar explícitamente la opción de descarga sin checksum. En este último caso el checksum queda `SKIP`; instala `xorriso`, `squashfs-tools`, QEMU y firmware, y ejecuta la inspección estática de Calamares.
 
 La acción manual prueba el artefacto indicado por quien la dispara. Si hay un checksum publicado, debe proporcionarse; sin él, solo se puede proceder con la opción explícita de HTTPS no verificado y el informe mantiene el checksum como `SKIP`. No se configuró descarga automática desde otro repositorio: el build upstream tiene artifacts de Actions aarch64 de vida limitada; una integración futura requiere coordinar en `Hoyuse/ChurrOS` un evento confiable y permisos mínimos.
 
@@ -110,9 +119,9 @@ python3 -m py_compile scripts/iso_tests.py tests/test_iso_tests.py
 ## Limitaciones actuales
 
 - No hay perfil gráfico visual automatizado; la salida serie comprueba solo un target systemd.
-- No se automatiza Calamares ni una instalación completa en disco virtual; abrir el instalador no prueba instalación.
+- No se ejecuta la interfaz de Calamares ni una instalación completa en disco virtual; `--check-installer` solo comprueba archivos y configuración, no que el instalador funcione o instale.
 - No hay un checksum publicado verificado para la ISO activa en este entorno.
-- QEMU, `xorriso`, firmware y una ISO real no están instalados/disponibles en este sandbox; no se ejecutó ningún boot de ChurrOS aquí.
-- La organización aún no alberga este repositorio; workflows aquí descritos son archivos locales, no workflows activos.
+- En este entorno local no están instalados QEMU, `xorriso` ni firmware; la prueba real de la ISO oficial se ejecutó en GitHub Actions y su resultado está documentado en [`docs/results/2026-10-11-niri-1.2.md`](docs/results/2026-10-11-niri-1.2.md).
+- El repositorio público y sus workflows están activos; la ejecución real inicial no aprobó todos los criterios y no se declara ChurrOS validado.
 
 Detalles de auditoría y arquitectura: [`docs/audit.md`](docs/audit.md), [`docs/design.md`](docs/design.md).
