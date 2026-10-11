@@ -1,0 +1,77 @@
+{
+  "schema_version": 1,
+  "project": "ChurrOS",
+  "source_repository": "Hoyuse/ChurrOS",
+  "profiles": {
+    "x86_64-niri": {
+      "architecture": "x86_64",
+      "edition": "niri",
+      "boot_modes": ["bios", "uefi"],
+      "qemu": "qemu-system-x86_64",
+      "serial_device": "ttyS0",
+      "uefi_firmware_family": "x86_64",
+      "efi_bootloader": "BOOTX64.EFI",
+      "success_patterns": [
+        "systemd\\[[0-9]+\\]: Reached target Graphical Interface\\.",
+        "systemd\\[[0-9]+\\]: Reached target Multi-User System\\."
+      ],
+      "notes": "Niri live desktop; serial marker validates systemd reaching a boot target, not visual desktop usability."
+    },
+    "x86_64-xfce": {
+      "architecture": "x86_64",
+      "edition": "xfce",
+      "boot_modes": ["bios", "uefi"],
+      "qemu": "qemu-system-x86_64",
+      "serial_device": "ttyS0",
+      "uefi_firmware_family": "x86_64",
+      "efi_bootloader": "BOOTX64.EFI",
+      "success_patterns": [
+        "systemd\\[[0-9]+\\]: Reached target Graphical Interface\\.",
+        "systemd\\[[0-9]+\\]: Reached target Multi-User System\\."
+      ],
+      "notes": "XFCE live desktop; serial marker validates systemd reaching a boot target, not visual desktop usability."
+    },
+    "x86_64-kde": {
+      "architecture": "x86_64",
+      "edition": "kde",
+      "boot_modes": ["bios", "uefi"],
+      "qemu": "qemu-system-x86_64",
+      "serial_device": "ttyS0",
+      "uefi_firmware_family": "x86_64",
+      "efi_bootloader": "BOOTX64.EFI",
+      "success_patterns": [
+        "systemd\\[[0-9]+\\]: Reached target Graphical Interface\\.",
+        "systemd\\[[0-9]+\\]: Reached target Multi-User System\\."
+      ],
+      "notes": "KDE Plasma live desktop; serial marker validates systemd reaching a boot target, not visual desktop usability."
+    },
+    "x86_64-server": {
+      "architecture": "x86_64",
+      "edition": "server",
+      "boot_modes": ["bios", "uefi"],
+      "qemu": "qemu-system-x86_64",
+      "serial_device": "ttyS0",
+      "uefi_firmware_family": "x86_64",
+      "efi_bootloader": "BOOTX64.EFI",
+      "success_patterns": [
+        "systemd\\[[0-9]+\\]: Reached target Graphical Interface\\.",
+        "systemd\\[[0-9]+\\]: Reached target Multi-User System\\."
+      ],
+      "notes": "The live ISO uses minimal XFCE for graphical Calamares; this is not the installed server target."
+    },
+    "aarch64-niri": {
+      "architecture": "aarch64",
+      "edition": "niri",
+      "boot_modes": ["uefi"],
+      "qemu": "qemu-system-aarch64",
+      "serial_device": "ttyAMA0",
+      "uefi_firmware_family": "aarch64",
+      "efi_bootloader": "BOOTAA64.EFI",
+      "success_patterns": [
+        "systemd\\[[0-9]+\\]: Reached target Graphical Interface\\.",
+        "systemd\\[[0-9]+\\]: Reached target Multi-User System\\."
+      ],
+      "notes": "Only Niri is currently wired for aarch64; use QEMU virt/cortex-a72 with PL011 serial."
+    }
+  }
+}

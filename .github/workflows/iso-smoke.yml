@@ -1,0 +1,78 @@
+name: ChurrOS ISO smoke test
+
+on:
+  workflow_dispatch:
+    inputs:
+      iso_url:
+        description: HTTPS URL for the exact ISO under test
+        required: true
+        type: string
+      expected_sha256:
+        description: Trusted SHA-256 if published (64 hexadecimal characters)
+        required: false
+        type: string
+      allow_unverified_download:
+        description: Explicitly accept HTTPS without a published trusted checksum; checksum status will be SKIP
+        required: false
+        type: boolean
+        default: false
+      profile:
+        description: ChurrOS architecture/edition profile
+        required: true
+        type: choice
+        options:
+          - x86_64-niri
+          - x86_64-xfce
+          - x86_64-kde
+          - x86_64-server
+          - aarch64-niri
+
+permissions:
+  contents: read
+
+concurrency:
+  group: isotests-smoke-${{ github.ref }}-${{ inputs.profile }}
+  cancel-in-progress: true
+
+jobs:
+  smoke:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - name: Install ISO inspection, emulation and firmware
+        shell: bash
+        run: |
+          mkdir -p artifacts/iso-test/evidence
+          set -o pipefail
+          {
+            sudo apt-get update &&
+            sudo apt-get install --no-install-recommends -y \
+              xorriso qemu-system-x86 qemu-system-arm ovmf qemu-efi-aarch64
+          } 2>&1 | tee artifacts/iso-test/evidence/dependency-install.log
+      - name: Run static checks and QEMU boot profiles
+        env:
+          ISO_URL: ${{ inputs.iso_url }}
+          EXPECTED_SHA256: ${{ inputs.expected_sha256 }}
+          ALLOW_UNVERIFIED: ${{ inputs.allow_unverified_download }}
+          ISO_PROFILE: ${{ inputs.profile }}
+        run: |
+          common=(python3 scripts/iso_tests.py --iso-url "$ISO_URL" --profile "$ISO_PROFILE" \
+            --report-dir artifacts/iso-test --timeout 900)
+          if [[ -n "$EXPECTED_SHA256" ]]; then
+            "${common[@]}" --expected-sha256 "$EXPECTED_SHA256"
+          elif [[ "$ALLOW_UNVERIFIED" == "true" ]]; then
+            "${common[@]}" --allow-unverified-download
+          else
+            echo 'Provide a trusted checksum or explicitly enable unverified HTTPS download.' >&2
+            exit 2
+          fi
+      - name: Preserve reports and diagnostics
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: iso-test-${{ inputs.profile }}-${{ github.run_id }}
+          path: artifacts/iso-test/
+          if-no-files-found: warn
+          retention-days: 14
