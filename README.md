@@ -67,7 +67,7 @@ python3 scripts/iso_tests.py --iso-url 'https://servidor/imagen.iso' --allow-unv
   --profile x86_64-niri --report-dir artifacts/unverified
 ```
 
-En este modo se calcula y registra SHA-256 pero `published_checksum` queda `SKIP`. La URL debe ser HTTPS, no puede incluir credenciales y la descarga temporal se elimina al terminar. Límite de tamaño: 16 GiB.
+En este modo se calcula y registra SHA-256 pero `published_checksum` queda `SKIP`. La URL debe ser HTTPS, no puede incluir credenciales, las redirecciones deben permanecer en el mismo host HTTPS y la descarga temporal se elimina al terminar. Límite de tamaño: 16 GiB.
 
 ### Firmware UEFI no detectado
 

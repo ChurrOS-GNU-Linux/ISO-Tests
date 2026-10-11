@@ -559,8 +559,13 @@ def download_iso(url: str, destination: Path, expected_sha256: str | None, timeo
     try:
         with urllib.request.urlopen(request, timeout=timeout) as response:
             final = urllib.parse.urlsplit(response.geturl())
-            if final.scheme != "https":
-                raise ValueError("download redirected to a non-HTTPS URL")
+            if final.scheme != "https" or final.username or final.password:
+                raise ValueError("download redirected to an invalid or non-HTTPS URL")
+            if expected_sha256 is None:
+                source_port = parsed.port or 443
+                final_port = final.port or 443
+                if (final.hostname or "").lower().rstrip(".") != (parsed.hostname or "").lower().rstrip(".") or final_port != source_port:
+                    raise ValueError("unverified download redirected to a different HTTPS host")
             header_size = response.headers.get("Content-Length")
             if header_size and int(header_size) > MAX_ISO_BYTES:
                 raise ValueError(f"remote artifact exceeds size limit of {MAX_ISO_BYTES} bytes")
