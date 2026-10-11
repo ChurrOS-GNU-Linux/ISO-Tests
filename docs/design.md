@@ -26,7 +26,7 @@ El formato/catálogo no es por sí solo prueba de arranque; el nivel B debe apro
 | Perfil | Firmware/máquina | Criterio PASS |
 |---|---|---|
 | x86_64 BIOS | QEMU `q35`, BIOS predeterminada de QEMU, TCG | Consola serie contiene mensaje systemd de target Graphical Interface o Multi-User System |
-| x86_64 UEFI | QEMU `q35`, par OVMF CODE/VARS igualado; copia desechable de VARS | Mismo marcador en serie |
+| x86_64 UEFI | QEMU `q35`, pareja OVMF CODE/VARS conocida (tamaños pueden diferir); copia desechable de VARS | Mismo marcador en serie |
 | aarch64 UEFI | QEMU `virt`, CPU `cortex-a72`, par AAVMF/firmware compatible | Mismo marcador en PL011 serie `ttyAMA0` |
 
 El perfil refleja solo los modos declarados por `profiledef.sh`; BIOS aarch64 se rechaza. Antes de QEMU se verifica que la configuración del modo dirija la consola del kernel al dispositivo serie esperado; si no, se registra `FAIL` en esa configuración y el arranque queda `BLOCKED`, sin insinuar que el sistema operativo falló. La VM se detiene cuando se ve un marcador, si sale antes o al alcanzar el límite de tiempo. La falta de emulador o firmware es `BLOCKED`; fallo de proceso o timeout sin marcador es `FAIL`.

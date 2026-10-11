@@ -80,7 +80,7 @@ En este modo se calcula y registra SHA-256 pero `published_checksum` queda `SKIP
 
 ### Firmware UEFI no detectado
 
-Pasa ambos archivos OVMF/AAVMF de una pareja compatible; el arnés comprueba que tengan el mismo tamaño y copia VARS a un archivo temporal desechable:
+Pasa ambos archivos CODE/VARS de la misma pareja OVMF/AAVMF; sus tamaños pueden ser distintos. El arnés comprueba que existan y no estén vacíos, y copia VARS a un archivo temporal desechable:
 
 ```bash
 python3 scripts/iso_tests.py ./out/imagen.iso --profile x86_64-niri \

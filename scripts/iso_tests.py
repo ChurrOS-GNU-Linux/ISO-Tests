@@ -318,8 +318,8 @@ def discover_firmware(family: str, code_arg: str | None, vars_arg: str | None) -
         code, variables = Path(code_arg), Path(vars_arg)
         if not code.is_file() or not variables.is_file():
             raise ValueError("specified UEFI firmware CODE/VARS file does not exist")
-        if code.stat().st_size != variables.stat().st_size:
-            raise ValueError("UEFI firmware CODE and VARS files must have equal sizes")
+        if code.stat().st_size == 0 or variables.stat().st_size == 0:
+            raise ValueError("UEFI firmware CODE and VARS files must be non-empty")
         return code, variables
     if family == "x86_64":
         pairs = [
@@ -338,7 +338,7 @@ def discover_firmware(family: str, code_arg: str | None, vars_arg: str | None) -
         raise ValueError(f"unsupported UEFI firmware family: {family}")
     for code_s, vars_s in pairs:
         code, variables = Path(code_s), Path(vars_s)
-        if code.is_file() and variables.is_file() and code.stat().st_size == variables.stat().st_size:
+        if code.is_file() and variables.is_file() and code.stat().st_size > 0 and variables.stat().st_size > 0:
             return code, variables
     return None
 
