@@ -411,12 +411,27 @@ def validate_iso(iso: Path, profile_name: str, profile: dict[str, Any], reporter
     started = time.monotonic()
     try:
         with iso.open("rb") as f:
-            f.seek(16 * 2048 + 1)
-            signature = f.read(5)
-        if signature == b"CD001":
-            reporter.add("iso9660_primary_volume_descriptor", "PASS", "CD001 primary volume descriptor at logical block 16", started)
+            f.seek(16 * 2048)
+            pvd = f.read(2048)
+        if len(pvd) != 2048 or pvd[0] != 1 or pvd[1:6] != b"CD001" or pvd[6] != 1:
+            reporter.add("iso9660_primary_volume_descriptor", "FAIL",
+                         "missing or invalid ISO9660 primary volume descriptor at logical block 16 (image may be truncated or not ISO)", started)
         else:
-            reporter.add("iso9660_primary_volume_descriptor", "FAIL", "missing ISO9660 CD001 primary volume descriptor at logical block 16 (image may be truncated or not ISO)", started)
+            blocks_le, blocks_be = int.from_bytes(pvd[80:84], "little"), int.from_bytes(pvd[84:88], "big")
+            block_size_le, block_size_be = int.from_bytes(pvd[128:130], "little"), int.from_bytes(pvd[130:132], "big")
+            actual_size = iso.stat().st_size
+            if blocks_le == 0 or blocks_le != blocks_be or block_size_le != block_size_be or block_size_le != 2048:
+                reporter.add("iso9660_primary_volume_descriptor", "FAIL",
+                             "primary volume descriptor has invalid dual-endian volume size or logical block size", started)
+            else:
+                declared_size = blocks_le * block_size_le
+                if declared_size > actual_size:
+                    reporter.add("iso9660_primary_volume_descriptor", "FAIL",
+                                 f"ISO declares {declared_size} bytes but only {actual_size} are present; artifact is truncated",
+                                 started)
+                else:
+                    reporter.add("iso9660_primary_volume_descriptor", "PASS",
+                                 f"CD001 descriptor at block 16; declares {declared_size} bytes, file has {actual_size}", started)
     except OSError as e:
         reporter.add("iso9660_primary_volume_descriptor", "FAIL", f"cannot read ISO descriptor: {e}", started)
 
@@ -750,6 +765,7 @@ def download_iso(url: str, destination: Path, expected_sha256: str | None, timeo
     request = urllib.request.Request(url, headers={"User-Agent": "ISO-Tests/0.1"})
     h = hashlib.sha256()
     total = 0
+    expected_total: int | None = None
     destination.parent.mkdir(parents=True, exist_ok=True)
     created = False
     try:
@@ -763,8 +779,15 @@ def download_iso(url: str, destination: Path, expected_sha256: str | None, timeo
                 if (final.hostname or "").lower().rstrip(".") != (parsed.hostname or "").lower().rstrip(".") or final_port != source_port:
                     raise ValueError("unverified download redirected to a different HTTPS host")
             header_size = response.headers.get("Content-Length")
-            if header_size and int(header_size) > MAX_ISO_BYTES:
-                raise ValueError(f"remote artifact exceeds size limit of {MAX_ISO_BYTES} bytes")
+            if header_size is not None:
+                try:
+                    expected_total = int(header_size)
+                except (TypeError, ValueError) as e:
+                    raise ValueError("server returned an invalid Content-Length header") from e
+                if expected_total < 0:
+                    raise ValueError("server returned a negative Content-Length header")
+                if expected_total > MAX_ISO_BYTES:
+                    raise ValueError(f"remote artifact exceeds size limit of {MAX_ISO_BYTES} bytes")
             with destination.open("xb") as out:
                 created = True
                 while True:
@@ -778,6 +801,8 @@ def download_iso(url: str, destination: Path, expected_sha256: str | None, timeo
                     out.write(block)
         if total == 0:
             raise ValueError("download returned an empty file")
+        if expected_total is not None and total != expected_total:
+            raise ValueError(f"download size mismatch: Content-Length was {expected_total} bytes but received {total}")
         digest = h.hexdigest()
         if expected_sha256 is not None and digest.lower() != expected_sha256.lower():
             raise ValueError("downloaded ISO SHA-256 does not match the supplied expected value")

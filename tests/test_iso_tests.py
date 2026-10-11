@@ -22,12 +22,15 @@ class Harness(unittest.TestCase):
         self.reporter = it.Reporter(self.root / "report", "unit-test")
         self.profile = it.load_profiles()["profiles"]["x86_64-niri"]
         self.iso = self.root / "unexpected name with spaces.iso"
-        # Explicit harness-only fixture. This is NOT an ISO image: it contains
-        # only a sparse slot and one ISO9660 signature used to exercise parsing.
+        # Harness-only synthetic descriptor fixture, not a bootable ISO.
+        pvd = bytearray(2048)
+        pvd[0], pvd[1:6], pvd[6] = 1, b"CD001", 1
+        pvd[80:84], pvd[84:88] = (32).to_bytes(4, "little"), (32).to_bytes(4, "big")
+        pvd[128:130], pvd[130:132] = (2048).to_bytes(2, "little"), (2048).to_bytes(2, "big")
         with self.iso.open("wb") as f:
-            f.truncate(32773)
-            f.seek(16 * 2048 + 1)
-            f.write(b"CD001")
+            f.truncate(32 * 2048)
+            f.seek(16 * 2048)
+            f.write(pvd)
 
     def tearDown(self):
         self.tmp.cleanup()
@@ -215,6 +218,17 @@ class Harness(unittest.TestCase):
         with mock.patch.object(it.shutil, "which", return_value=None):
             it.validate_iso(self.iso, "x86_64-niri", self.profile, self.reporter, None, None, 1)
         self.assertEqual(next(t.status for t in self.reporter.tests if t.name == "iso9660_primary_volume_descriptor"), "FAIL")
+
+    def test_declared_iso_volume_larger_than_artifact_is_reported_as_truncated(self):
+        self.set_minimum_size()
+        with self.iso.open("r+b") as f:
+            f.seek(16 * 2048 + 80)
+            f.write((100).to_bytes(4, "little") + (100).to_bytes(4, "big"))
+        with mock.patch.object(it.shutil, "which", return_value=None):
+            it.validate_iso(self.iso, "x86_64-niri", self.profile, self.reporter, None, None, 1)
+        result = next(t for t in self.reporter.tests if t.name == "iso9660_primary_volume_descriptor")
+        self.assertEqual(result.status, "FAIL")
+        self.assertIn("artifact is truncated", result.message)
 
     def test_missing_xorriso_is_blocked_not_skipped_or_pass(self):
         self.set_minimum_size()
@@ -421,6 +435,19 @@ class Harness(unittest.TestCase):
         self.assertEqual(by_name["artifact_download"], "PASS")
         self.assertEqual(by_name["published_checksum"], "SKIP")
         self.assertEqual(list(report_dir.glob(".iso-download-*")), [])
+
+    def test_download_content_length_mismatch_rejects_truncation_and_cleans_partial_file(self):
+        payload = b"only part of response"
+        response = mock.MagicMock()
+        response.__enter__.return_value = response
+        response.geturl.return_value = "https://example.invalid/image.iso"
+        response.headers = {"Content-Length": str(len(payload) + 25)}
+        response.read.side_effect = [payload, b""]
+        dst = self.root / "truncated.iso"
+        with mock.patch.object(it.urllib.request, "urlopen", return_value=response):
+            with self.assertRaisesRegex(ValueError, "download size mismatch"):
+                it.download_iso("https://example.invalid/image.iso", dst, None, 1)
+        self.assertFalse(dst.exists())
 
     def test_download_checksum_mismatch_cleans_its_partial_file_only(self):
         payload = b"downloaded content"
