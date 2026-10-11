@@ -14,6 +14,7 @@ import os
 import re
 import signal
 import shutil
+import stat
 import subprocess
 import sys
 import tempfile
@@ -148,6 +149,34 @@ def load_profiles(path: Path = DEFAULT_PROFILES) -> dict[str, Any]:
                 re.compile(pattern)
             except (TypeError, re.error) as e:
                 raise ValueError(f"profile {name!r}: invalid success pattern: {e}") from e
+    installer = data.get("installer_payload")
+    if installer is not None:
+        if not isinstance(installer, dict):
+            raise ValueError("installer_payload must be an object")
+        template = installer.get("rootfs_iso_template")
+        if not isinstance(template, str) or "{architecture}" not in template or not template.startswith("/"):
+            raise ValueError("installer_payload.rootfs_iso_template must be an absolute path with {architecture}")
+        files = installer.get("required_files")
+        if not isinstance(files, list) or not files or any(
+                not isinstance(f, str) or f.startswith("/") or ".." in Path(f).parts for f in files):
+            raise ValueError("installer_payload.required_files must contain safe relative paths")
+        markers = installer.get("text_markers", {})
+        if not isinstance(markers, dict) or any(
+                key not in files or not isinstance(values, list) or not values or
+                any(not isinstance(value, str) or not value for value in values)
+                for key, values in markers.items()):
+            raise ValueError("installer_payload.text_markers must map required files to non-empty strings")
+    strategy = data.get("uefi_boot_strategy", "fallback_file")
+    if strategy not in {"fallback_file", "embedded_eltorito"}:
+        raise ValueError("uefi_boot_strategy must be fallback_file or embedded_eltorito")
+    serial_paths = data.get("serial_console_paths", {})
+    if not isinstance(serial_paths, dict) or any(
+            mode not in {"bios", "uefi"} or not isinstance(path, str) or not path.startswith("/") or
+            ".." in Path(path).parts for mode, path in serial_paths.items()):
+        raise ValueError("serial_console_paths must map BIOS/UEFI modes to safe absolute paths")
+    for profile in profiles.values():
+        profile.setdefault("uefi_boot_strategy", strategy)
+        profile.setdefault("serial_console_paths", serial_paths)
     return data
 
 
@@ -211,6 +240,33 @@ def run_command(argv: list[str], timeout: float, log_path: Path) -> tuple[int | 
         _ = started
 
 
+def run_command_discard_stdout(argv: list[str], timeout: float, log_path: Path) -> tuple[int | None, str | None]:
+    """Run a command while discarding potentially large stdout, retaining only stderr."""
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    proc: subprocess.Popen[bytes] | None = None
+    try:
+        proc = subprocess.Popen(argv, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                                stderr=subprocess.PIPE, env=command_env(), start_new_session=True)
+        try:
+            _, stderr = proc.communicate(timeout=timeout)
+        except subprocess.TimeoutExpired:
+            _kill_process_group(proc)
+            _, stderr = proc.communicate()
+            _write_output(log_path, stderr or b"")
+            return None, f"command timed out after {timeout:g}s"
+        _write_output(log_path, stderr or b"")
+        return proc.returncode, None
+    except OSError as e:
+        message = f"could not execute {argv[0]!r}: {e}"
+        log_path.write_text(message + "\n", encoding="utf-8")
+        return None, message
+    except BaseException:
+        if proc is not None and proc.poll() is None:
+            _kill_process_group(proc)
+            proc.communicate()
+        raise
+
+
 def _kill_process_group(proc: subprocess.Popen[bytes]) -> None:
     if proc.poll() is not None:
         return
@@ -268,6 +324,7 @@ def discover_firmware(family: str, code_arg: str | None, vars_arg: str | None) -
     if family == "x86_64":
         pairs = [
             ("/usr/share/edk2/x64/OVMF_CODE.4m.fd", "/usr/share/edk2/x64/OVMF_VARS.4m.fd"),
+            ("/usr/share/OVMF/OVMF_CODE_4M.fd", "/usr/share/OVMF/OVMF_VARS_4M.fd"),
             ("/usr/share/OVMF/OVMF_CODE.fd", "/usr/share/OVMF/OVMF_VARS.fd"),
             ("/usr/share/qemu/OVMF_CODE.fd", "/usr/share/qemu/OVMF_VARS.fd"),
         ]
@@ -374,6 +431,7 @@ def validate_iso(iso: Path, profile_name: str, profile: dict[str, Any], reporter
 
     eltorito_log = reporter.evidence_dir / f"{profile_name}-xorriso-eltorito.log"
     started = time.monotonic()
+    modes_found: set[str] | None = None
     rc, output, err = run_command([xorriso, "-indev", str(iso), "-report_el_torito", "plain"], xorriso_timeout, eltorito_log)
     if err or rc != 0:
         reporter.add("xorriso_el_torito", "FAIL" if rc not in (None, 0) or (err and "timed out" in err) else "BLOCKED",
@@ -411,6 +469,16 @@ def validate_iso(iso: Path, profile_name: str, profile: dict[str, Any], reporter
 
     if "uefi" not in profile["boot_modes"]:
         reporter.add("efi_bootloader_file", "SKIP", "Profile does not declare UEFI boot", time.monotonic())
+    elif modes_found is None:
+        reporter.add("efi_bootloader_file", "BLOCKED", "UEFI boot entry was not inspectable", time.monotonic(), eltorito_log)
+    elif profile.get("uefi_boot_strategy", "fallback_file") == "embedded_eltorito":
+        if "uefi" in modes_found:
+            reporter.add("efi_bootloader_file", "SKIP",
+                         "UEFI loader is inside the embedded El Torito image, not the visible ISO tree; QEMU UEFI boot is required",
+                         time.monotonic(), eltorito_log)
+        else:
+            reporter.add("efi_bootloader_file", "FAIL", "profile expects an embedded UEFI El Torito image, but none was reported",
+                         time.monotonic(), eltorito_log)
     else:
         loader = profile.get("efi_bootloader")
         if not isinstance(loader, str) or not re.fullmatch(r"BOOT[A-Z0-9]+\.EFI", loader):
@@ -428,6 +496,134 @@ def validate_iso(iso: Path, profile_name: str, profile: dict[str, Any], reporter
             else:
                 reporter.add("efi_bootloader_file", "FAIL", f"EFI fallback loader /EFI/BOOT/{loader} not found in ISO tree", started, efi_log)
     return digest, tool_versions
+
+
+def validate_serial_console_config(iso: Path, profile_name: str, profile: dict[str, Any], mode: str,
+                                   reporter: Reporter, timeout: float) -> bool | None:
+    started = time.monotonic()
+    name = f"serial_console_config_{mode}"
+    paths = profile.get("serial_console_paths", {})
+    iso_path = paths.get(mode) if isinstance(paths, dict) else None
+    if not isinstance(iso_path, str) or not iso_path.startswith("/") or ".." in Path(iso_path).parts:
+        reporter.add(name, "BLOCKED", f"no safe ISO config path configured for {mode}", started)
+        return None
+    xorriso = shutil.which("xorriso")
+    if not xorriso:
+        reporter.add(name, "BLOCKED", "xorriso is required to inspect the serial-console config", started)
+        return None
+    device = profile.get("serial_device")
+    if not isinstance(device, str) or not re.fullmatch(r"tty[A-Za-z0-9_-]+", device):
+        reporter.add(name, "FAIL", "profile has an invalid serial device name", started)
+        return False
+    log = reporter.evidence_dir / f"{profile_name}-serial-config-{mode}.log"
+    try:
+        with tempfile.TemporaryDirectory(prefix=".serial-config-", dir=reporter.report_dir) as temp:
+            extracted = Path(temp) / "boot-config.txt"
+            rc, output, err = run_command(
+                [xorriso, "-osirrox", "on", "-indev", str(iso), "-extract", iso_path, str(extracted)],
+                timeout, log)
+            if err or rc != 0 or not extracted.is_file():
+                message = err or f"boot config {iso_path} is missing or unreadable (xorriso exit {rc})"
+                reporter.add(name, "FAIL", message, started, log)
+                return False
+            if extracted.stat().st_size > 1024 * 1024:
+                reporter.add(name, "FAIL", f"boot config {iso_path} exceeds 1 MiB inspection limit", started, log)
+                return False
+            content = extracted.read_text(encoding="utf-8", errors="replace")
+            expected = f"console={device}"
+            if not re.search(rf"{re.escape(expected)}(?:,|\s|$)", content):
+                reporter.add(name, "FAIL",
+                             f"{iso_path} does not pass {expected} to the kernel; serial boot markers cannot be observed",
+                             started, log)
+                return False
+            reporter.add(name, "PASS", f"{iso_path} passes {expected} to the kernel", started, log)
+            return True
+    except OSError as e:
+        reporter.add(name, "FAIL", str(e), started, log)
+        return False
+
+
+def validate_installer_payload(iso: Path, profile: dict[str, Any], spec: dict[str, Any] | None,
+                               reporter: Reporter, timeout: float) -> None:
+    started = time.monotonic()
+    if not isinstance(spec, dict):
+        reporter.add("installer_live_payload", "SKIP", "No installer payload expectation configured", started)
+        return
+    xorriso, unsquashfs = shutil.which("xorriso"), shutil.which("unsquashfs")
+    if not xorriso or not unsquashfs:
+        missing = [name for name, path in (("xorriso", xorriso), ("unsquashfs", unsquashfs)) if not path]
+        reporter.add("installer_live_payload", "BLOCKED",
+                     f"required inspection tool(s) unavailable: {', '.join(missing)}", started)
+        return
+    architecture = profile["architecture"]
+    try:
+        image_path = spec["rootfs_iso_template"].format(architecture=architecture)
+        required = spec["required_files"]
+        markers = spec.get("text_markers", {})
+        if not image_path.startswith("/") or ".." in Path(image_path).parts:
+            raise ValueError("unsafe live rootfs image path in profile")
+        if "usr/bin/calamares" not in required:
+            raise ValueError("installer payload must require usr/bin/calamares")
+        text_files = [p for p in required if p != "usr/bin/calamares"]
+        with tempfile.TemporaryDirectory(prefix=".installer-payload-", dir=reporter.report_dir) as temp:
+            work = Path(temp)
+            squashfs = work / "airootfs.sfs"
+            iso_log = reporter.evidence_dir / "installer-rootfs-xorriso.log"
+            rc, output, err = run_command(
+                [xorriso, "-osirrox", "on", "-indev", str(iso), "-extract", image_path, str(squashfs)],
+                timeout, iso_log)
+            if err or rc != 0 or not squashfs.is_file() or squashfs.stat().st_size == 0:
+                message = err or (f"xorriso exited with status {rc}" if rc else
+                                  f"live rootfs image {image_path} was not extracted")
+                reporter.add("installer_live_payload", "FAIL", message, started, iso_log)
+                return
+
+            binary_log = reporter.evidence_dir / "installer-calamares-binary-probe.log"
+            rc, err = run_command_discard_stdout(
+                [unsquashfs, "-no-progress", "-cat", str(squashfs), "usr/bin/calamares"], timeout, binary_log)
+            if err or rc != 0:
+                message = err or f"usr/bin/calamares missing from live rootfs (unsquashfs exit {rc})"
+                reporter.add("installer_live_payload", "FAIL", message, started, binary_log)
+                return
+
+            extracted = work / "files"
+            extract_log = reporter.evidence_dir / "installer-payload-unsquashfs.log"
+            rc, output, err = run_command(
+                [unsquashfs, "-no-progress", "-d", str(extracted), str(squashfs), *text_files],
+                timeout, extract_log)
+            if err or rc != 0:
+                reporter.add("installer_live_payload", "FAIL",
+                             err or f"unsquashfs exited with status {rc}", started, extract_log)
+                return
+            manifest: list[str] = ["usr/bin/calamares: readable by unsquashfs -cat"]
+            for relative in text_files:
+                candidate = extracted / relative
+                try:
+                    mode = candidate.lstat().st_mode
+                    if not stat.S_ISREG(mode):
+                        raise ValueError("not a regular file")
+                    if candidate.stat().st_size > 1024 * 1024:
+                        raise ValueError("text/config file exceeds 1 MiB inspection limit")
+                    content = candidate.read_text(encoding="utf-8", errors="replace")
+                except (OSError, ValueError) as e:
+                    reporter.add("installer_live_payload", "FAIL",
+                                 f"required live file {relative} missing or invalid: {e}", started, extract_log)
+                    return
+                expected_markers = markers.get(relative, [])
+                missing = [marker.format(architecture=architecture) for marker in expected_markers
+                           if marker.format(architecture=architecture) not in content]
+                if missing:
+                    reporter.add("installer_live_payload", "FAIL",
+                                 f"{relative} lacks expected marker(s): {', '.join(missing)}", started, extract_log)
+                    return
+                manifest.append(f"{relative}: {candidate.stat().st_size} bytes; required markers present")
+            manifest_path = reporter.evidence_dir / "installer-payload-manifest.txt"
+            manifest_path.write_text("\n".join(manifest) + "\n", encoding="utf-8")
+            reporter.add("installer_live_payload", "PASS",
+                         "Calamares binary, live launcher, desktop entry and configuration are present; this does not run the GUI or install ChurrOS",
+                         started, manifest_path)
+    except (OSError, KeyError, ValueError) as e:
+        reporter.add("installer_live_payload", "FAIL", str(e), started)
 
 
 def _qemu_args(profile: dict[str, Any], mode: str, iso: Path, serial_log: Path,
@@ -613,6 +809,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--profiles", type=Path, default=DEFAULT_PROFILES, help=argparse.SUPPRESS)
     parser.add_argument("--mode", choices=("all", "bios", "uefi"), default="all")
     parser.add_argument("--no-boot", action="store_true", help="run static checks only; boot checks are explicitly SKIP")
+    parser.add_argument("--check-installer", action="store_true",
+                        help="inspect the SquashFS for the Calamares live payload; does not run the installer")
     parser.add_argument("--report-dir", type=Path, default=Path("artifacts"), help="JSON report and diagnostic output directory")
     parser.add_argument("--timeout", type=float, default=600, help="per QEMU boot timeout in seconds (max 1800)")
     parser.add_argument("--xorriso-timeout", type=float, default=120, help="per xorriso command timeout in seconds")
@@ -696,15 +894,29 @@ def main(argv: list[str] | None = None) -> int:
         digest, tool_versions = validate_iso(iso, args.profile, profile, reporter,
                                              args.expected_sha256,
                                              args.sha256sums, args.xorriso_timeout)
+        if args.check_installer:
+            validate_installer_payload(iso, profile, profile_data.get("installer_payload"),
+                                       reporter, args.xorriso_timeout)
+            tool_versions["unsquashfs"] = _tool_version("unsquashfs")
+        else:
+            reporter.add("installer_live_payload", "SKIP", "Installer payload inspection not requested", time.monotonic())
         artifact["sha256"] = digest
         tool_versions[profile["qemu"]] = _tool_version(profile["qemu"])
+        serial_ready = {mode: validate_serial_console_config(iso, args.profile, profile, mode,
+                                                            reporter, args.xorriso_timeout)
+                        for mode in modes}
         if args.no_boot:
             for mode in modes:
                 reporter.add(f"qemu_boot_{architecture}_{mode}", "SKIP", "Static-only run requested; no boot claim is made", time.monotonic())
         else:
             for mode in modes:
-                run_boot_test(iso, args.profile, profile, mode, reporter, args.timeout,
-                              (args.uefi_code, args.uefi_vars))
+                if serial_ready[mode] is True:
+                    run_boot_test(iso, args.profile, profile, mode, reporter, args.timeout,
+                                  (args.uefi_code, args.uefi_vars))
+                else:
+                    reporter.add(f"qemu_boot_{architecture}_{mode}", "BLOCKED",
+                                 f"serial-console boot marker cannot be evaluated; inspect serial_console_config_{mode}",
+                                 time.monotonic())
         statuses = [t.status for t in reporter.tests]
         exit_code = 1 if any(s in {"FAIL", "BLOCKED"} for s in statuses) else 0
     except KeyboardInterrupt as e:

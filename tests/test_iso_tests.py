@@ -61,6 +61,111 @@ class Harness(unittest.TestCase):
         self.addCleanup(lambda: os.environ.__setitem__("PATH", self._old_path))
         return exe
 
+    def fake_installer_tools(self, omit: tuple[str, ...] = (), omit_binary: bool = False) -> tuple[Path, Path]:
+        bindir = self.root / "fake installer tools"
+        bindir.mkdir(exist_ok=True)
+        xorriso = bindir / "xorriso"
+        xorriso.write_text("#!/usr/bin/env python3\nimport sys\nfrom pathlib import Path\ni=sys.argv.index('-extract')\np=Path(sys.argv[i+2]); p.parent.mkdir(parents=True,exist_ok=True); p.write_bytes(b'fake squashfs')\n",
+                          encoding="utf-8")
+        contents = {
+            "usr/local/bin/calamares": "#!/bin/bash\nexec sudo -n /usr/bin/calamares\n",
+            "usr/share/applications/calamares.desktop": "Exec=/usr/local/bin/calamares\n",
+            "etc/calamares/settings.conf": "sequence:\nbranding: churros\n",
+            "etc/calamares/branding/churros/branding.desc": "Name=ChurrOS\n",
+            "etc/calamares/modules/unpackfs.conf": f'source: "/run/archiso/bootmnt/churros/{self.profile["architecture"]}/airootfs.sfs"\n',
+        }
+        unsquashfs = bindir / "unsquashfs"
+        body = "#!/usr/bin/env python3\nimport sys\nfrom pathlib import Path\n"
+        body += "contents=" + repr(contents) + "\nomit=" + repr(tuple(omit)) + "\n"
+        body += "if '-cat' in sys.argv:\n    raise SystemExit(1 if " + repr(omit_binary) + " else 0)\n"
+        body += "i=sys.argv.index('-d'); dest=Path(sys.argv[i+1]); files=sys.argv[i+3:]\n"
+        body += "for name in files:\n    if name in omit: continue\n    p=dest/name; p.parent.mkdir(parents=True,exist_ok=True); p.write_text(contents[name])\n    if name=='usr/local/bin/calamares': p.chmod(0o755)\n"
+        unsquashfs.write_text(body, encoding="utf-8")
+        for exe in (xorriso, unsquashfs):
+            exe.chmod(exe.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
+        return xorriso, unsquashfs
+
+    def fake_xorriso_extractor(self, files: dict[str, str]) -> Path:
+        bindir = self.root / "fake xorriso extract bin"
+        bindir.mkdir(exist_ok=True)
+        exe = bindir / "xorriso"
+        body = "#!/usr/bin/env python3\nimport sys,json\nfrom pathlib import Path\n"
+        body += "files=" + repr(files) + "\na=sys.argv; i=a.index('-extract'); name=a[i+1]; dest=Path(a[i+2])\n"
+        body += "if name not in files: raise SystemExit(3)\ndest.parent.mkdir(parents=True,exist_ok=True); dest.write_text(files[name])\n"
+        exe.write_text(body, encoding="utf-8")
+        exe.chmod(exe.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
+        return exe
+
+    def test_serial_console_config_checks_mode_specific_kernel_args(self):
+        files = {"/boot/syslinux/archiso_sys-linux.cfg": "APPEND archisobasedir=churros console=ttyS0,115200"}
+        xorriso = self.fake_xorriso_extractor(files)
+        with mock.patch.object(it.shutil, "which", return_value=str(xorriso)):
+            ok = it.validate_serial_console_config(self.iso, "x86_64-niri", self.profile,
+                                                   "bios", self.reporter, 5)
+        self.assertTrue(ok)
+        self.assertEqual(self.reporter.tests[-1].status, "PASS")
+
+    def test_serial_console_config_fails_when_kernel_console_is_missing(self):
+        files = {"/boot/syslinux/archiso_sys-linux.cfg": "APPEND archisobasedir=churros quiet"}
+        xorriso = self.fake_xorriso_extractor(files)
+        with mock.patch.object(it.shutil, "which", return_value=str(xorriso)):
+            ok = it.validate_serial_console_config(self.iso, "x86_64-niri", self.profile,
+                                                   "bios", self.reporter, 5)
+        self.assertFalse(ok)
+        self.assertEqual(self.reporter.tests[-1].status, "FAIL")
+        self.assertIn("console=ttyS0", self.reporter.tests[-1].message)
+
+    def test_serial_console_config_missing_from_iso_is_a_failure(self):
+        xorriso = self.fake_xorriso_extractor({})
+        with mock.patch.object(it.shutil, "which", return_value=str(xorriso)):
+            ok = it.validate_serial_console_config(self.iso, "x86_64-niri", self.profile,
+                                                   "bios", self.reporter, 5)
+        self.assertFalse(ok)
+        self.assertEqual(self.reporter.tests[-1].status, "FAIL")
+        self.assertIn("missing or unreadable", self.reporter.tests[-1].message)
+
+    def test_installer_payload_check_confirms_static_files_and_markers_only(self):
+        xorriso, unsquashfs = self.fake_installer_tools()
+        paths = {"xorriso": xorriso, "unsquashfs": unsquashfs}
+        with mock.patch.object(it.shutil, "which", side_effect=lambda name: str(paths[name])):
+            it.validate_installer_payload(self.iso, self.profile,
+                                          it.load_profiles()["installer_payload"], self.reporter, 5)
+        result = next(t for t in self.reporter.tests if t.name == "installer_live_payload")
+        self.assertEqual(result.status, "PASS")
+        self.assertIn("does not run the GUI", result.message)
+        manifest = self.reporter.report_dir / result.log_path
+        self.assertTrue(manifest.is_file())
+        self.assertIn("etc/calamares/settings.conf", manifest.read_text(encoding="utf-8"))
+
+    def test_installer_payload_missing_configuration_is_failure(self):
+        xorriso, unsquashfs = self.fake_installer_tools(("etc/calamares/settings.conf",))
+        paths = {"xorriso": xorriso, "unsquashfs": unsquashfs}
+        with mock.patch.object(it.shutil, "which", side_effect=lambda name: str(paths[name])):
+            it.validate_installer_payload(self.iso, self.profile,
+                                          it.load_profiles()["installer_payload"], self.reporter, 5)
+        result = next(t for t in self.reporter.tests if t.name == "installer_live_payload")
+        self.assertEqual(result.status, "FAIL")
+        self.assertIn("settings.conf", result.message)
+
+    def test_installer_payload_missing_calamares_binary_is_failure(self):
+        xorriso, unsquashfs = self.fake_installer_tools(omit_binary=True)
+        paths = {"xorriso": xorriso, "unsquashfs": unsquashfs}
+        with mock.patch.object(it.shutil, "which", side_effect=lambda name: str(paths[name])):
+            it.validate_installer_payload(self.iso, self.profile,
+                                          it.load_profiles()["installer_payload"], self.reporter, 5)
+        result = next(t for t in self.reporter.tests if t.name == "installer_live_payload")
+        self.assertEqual(result.status, "FAIL")
+        self.assertIn("usr/bin/calamares missing", result.message)
+
+    def test_installer_payload_check_is_blocked_without_unsquashfs(self):
+        xorriso, _ = self.fake_installer_tools()
+        with mock.patch.object(it.shutil, "which", side_effect=lambda name: str(xorriso) if name == "xorriso" else None):
+            it.validate_installer_payload(self.iso, self.profile,
+                                          it.load_profiles()["installer_payload"], self.reporter, 5)
+        result = next(t for t in self.reporter.tests if t.name == "installer_live_payload")
+        self.assertEqual(result.status, "BLOCKED")
+        self.assertIn("unsquashfs", result.message)
+
     def test_profile_table_matches_real_architectures_and_modes(self):
         p = it.load_profiles()["profiles"]
         self.assertEqual({n for n in p if n.startswith("x86_64-")}, {
@@ -141,15 +246,16 @@ class Harness(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "found 2"):
             it.parse_sha256sums(sums, self.iso)
 
-    def test_static_validator_detects_boot_catalog_and_efi_loader(self):
+    def test_static_validator_detects_boot_catalog_and_embedded_uefi_image(self):
         self.set_minimum_size()
-        self.fake_xorriso("El Torito catalog : 23 1\\nEl Torito boot img : 24 4 BIOS y none\\nEl Torito boot img : 25 1 UEFI y none\\n/EFI/BOOT/BOOTX64.EFI")
+        self.fake_xorriso("El Torito catalog : 23 1\\nEl Torito boot img : 24 4 BIOS y none\\nEl Torito boot img : 25 1 UEFI y none")
         it.validate_iso(self.iso, "x86_64-niri", self.profile, self.reporter, None, None, 2)
         by_name = {t.name: t.status for t in self.reporter.tests}
         self.assertEqual(by_name["xorriso_el_torito"], "PASS")
         self.assertEqual(by_name["boot_structure_bios"], "PASS")
         self.assertEqual(by_name["boot_structure_uefi"], "PASS")
-        self.assertEqual(by_name["efi_bootloader_file"], "PASS")
+        self.assertEqual(by_name["efi_bootloader_file"], "SKIP")
+        self.assertIn("embedded El Torito image", next(t.message for t in self.reporter.tests if t.name == "efi_bootloader_file"))
 
     def test_static_validator_rejects_missing_expected_uefi_entry_and_loader(self):
         self.set_minimum_size()
@@ -201,6 +307,19 @@ class Harness(unittest.TestCase):
         p["boot_modes"] = ["uefi"]
         it.run_boot_test(self.iso, "bad", p, "bios", self.reporter, 1, (None, None))
         self.assertEqual(self.reporter.tests[-1].status, "FAIL")
+
+    def test_ubuntu_24_04_ovmf_4m_files_are_discovered(self):
+        code = Path("/usr/share/OVMF/OVMF_CODE_4M.fd")
+        variables = Path("/usr/share/OVMF/OVMF_VARS_4M.fd")
+        allowed = {str(code), str(variables)}
+        real_stat = Path.stat
+        def fake_stat(path, *args, **kwargs):
+            if str(path) in allowed:
+                return mock.Mock(st_size=4 * 1024 * 1024)
+            return real_stat(path, *args, **kwargs)
+        with mock.patch.object(Path, "is_file", autospec=True,
+                               side_effect=lambda path: str(path) in allowed), mock.patch.object(Path, "stat", autospec=True, side_effect=fake_stat):
+            self.assertEqual(it.discover_firmware("x86_64", None, None), (code, variables))
 
     def test_uefi_firmware_requires_matching_code_and_vars_and_uses_copy(self):
         code = self.root / "code.fd"

@@ -2,7 +2,7 @@
 
 ## Límite de responsabilidad
 
-ISO-Tests recibe una ISO ya construida; no modifica ChurrOS ni extrae/root-monta imágenes. QEMU es el único componente que arranca el artefacto. La VM corre en TCG, sin interfaz gráfica visible, sin NIC, sin disco del anfitrión y sin disco de instalación por defecto. Se copian las variables UEFI a un archivo de evidencia temporal y se borran tras el test; el firmware CODE es solo lectura.
+ISO-Tests recibe una ISO ya construida; no modifica ChurrOS ni monta imágenes en el host. Bajo `--check-installer`, `xorriso` extrae solo el SquashFS live a un temporal y `unsquashfs` inspecciona los archivos de Calamares configurados, sin ejecutar código del sistema live. QEMU es el único componente que arranca el artefacto. La VM corre en TCG, sin interfaz gráfica visible, sin NIC, sin disco del anfitrión y sin disco de instalación por defecto. Se copian las variables UEFI a un archivo de evidencia temporal y se borran tras el test; el firmware CODE es solo lectura.
 
 Las llamadas a herramientas usan vectores `argv` sin shell, entorno mínimo sin variables secretas, logs limitados, timeout y terminación del grupo de procesos. Un timeout sin marcador no es éxito. Los tests unitarios mockean procesos exclusivamente para comprobar el comportamiento del arnés; esos resultados no cuentan como arranque.
 
@@ -15,7 +15,9 @@ Las llamadas a herramientas usan vectores `argv` sin shell, entorno mínimo sin 
 3. Compara contra `--expected-sha256` o una entrada inequívoca de `--sha256sums`. Sin referencia: `published_checksum=SKIP`.
 4. Exige `CD001` en el descriptor primario ISO9660 del bloque 16.
 5. `xorriso -report_el_torito plain` debe encontrar entradas boot El Torito para cada modo del perfil; `-report_system_area plain` conserva diagnóstico.
-6. En perfiles UEFI, busca el cargador fallback específico (BOOTX64.EFI o BOOTAA64.EFI) en el árbol ISO. Archivo con nombre conocido sin catálogo no implica arrancabilidad: también se exigen el reporte El Torito y posteriormente la evidencia QEMU.
+6. Valida el mecanismo UEFI declarado. Para `embedded_eltorito`, el catálogo debe reportar imagen UEFI; `efi_bootloader_file=SKIP` porque el ESP va dentro de esa imagen y QEMU debe verificar el arranque. Para `fallback_file`, busca el cargador EFI en el árbol ISO.
+7. Extrae a temporal el archivo de configuración Syslinux/GRUB por modo y exige el parámetro `console=<serial_device>` antes de usar marcadores serie. Si falta, el arranque QEMU queda `BLOCKED` en vez de consumir el timeout sin una consola observable.
+8. Opcionalmente `--check-installer` extrae el SquashFS y comprueba el binario/lanzador/configuración Calamares; no ejecuta nada del entorno Live.
 
 El formato/catálogo no es por sí solo prueba de arranque; el nivel B debe aprobar para afirmar boot.
 
@@ -27,13 +29,13 @@ El formato/catálogo no es por sí solo prueba de arranque; el nivel B debe apro
 | x86_64 UEFI | QEMU `q35`, par OVMF CODE/VARS igualado; copia desechable de VARS | Mismo marcador en serie |
 | aarch64 UEFI | QEMU `virt`, CPU `cortex-a72`, par AAVMF/firmware compatible | Mismo marcador en PL011 serie `ttyAMA0` |
 
-El perfil refleja solo los modos declarados por `profiledef.sh`; BIOS aarch64 se rechaza. La VM se detiene cuando se ve un marcador, si sale antes o al alcanzar el límite de tiempo. La falta de emulador o firmware es `BLOCKED`; fallo de proceso, configuración de QEMU o timeout es `FAIL`.
+El perfil refleja solo los modos declarados por `profiledef.sh`; BIOS aarch64 se rechaza. Antes de QEMU se verifica que la configuración del modo dirija la consola del kernel al dispositivo serie esperado; si no, se registra `FAIL` en esa configuración y el arranque queda `BLOCKED`, sin insinuar que el sistema operativo falló. La VM se detiene cuando se ve un marcador, si sale antes o al alcanzar el límite de tiempo. La falta de emulador o firmware es `BLOCKED`; fallo de proceso o timeout sin marcador es `FAIL`.
 
-**Alcance de la evidencia:** el marcador confirma que el kernel arrancó y systemd alcanzó uno de esos targets; no confirma que el compositor o greeter funcione visualmente. Esta evidencia mínima es verificable desde la configuración serie presente en GRUB upstream. Está pendiente comparar en QEMU real que las versiones actuales de systemd/QEMU impriman el patrón en el log; de no aparecer, se debe actualizar el mecanismo de señal con evidencia del sistema, no relajar a “QEMU siguió vivo”. Una prueba de escritorio necesitaría captura/control de pantalla con aserciones visibles y perfiles de edición.
+**Alcance de la evidencia:** el marcador confirma que el kernel arrancó y systemd alcanzó uno de esos targets; no confirma que el compositor o greeter funcione visualmente. La configuración GRUB upstream dirige la consola del kernel al puerto serie, pero la configuración BIOS de Syslinux auditada no pasa `console=ttyS0`. En la ejecución real Niri x86_64, QEMU BIOS mostró ISOLINUX y la carga de kernel/initramfs, pero no llegó al marcador serie dentro de 900 s. Eso significa que la prueba no pudo observar el criterio y no demuestra por sí solo un fallo de arranque del sistema. El arnés ahora preflight-ea el archivo de configuración de cada modo: sin el parámetro serie registra el defecto y deja QEMU `BLOCKED`, evitando repetir un timeout no observable. La ejecución UEFI quedó bloqueada por firmware faltante, por lo que no hay evidencia de arranque UEFI real. Una prueba de escritorio necesitaría captura/control de pantalla con aserciones visibles y perfiles de edición.
 
 ### C. Instalador
 
-No se ejecuta Calamares en esta versión. ChurrOS tiene configuración propia de Calamares y un checklist de instalación manual, pero una instalación satisfactoria requiere configurar un disco virtual desechable, confirmar la ruta de módulos, bootloader por arquitectura, instalación sin red, resultados instalados y segundo arranque. La GUI de escritorio de este entorno no se valida por serie. Solo abrir Calamares no se reportaría como instalación. La etapa queda pendiente hasta que haya una VM visualmente controlable y logs observables; nunca se adjuntan discos físicos.
+`--check-installer` verifica estáticamente en `airootfs.sfs` que exista `/usr/bin/calamares`, el wrapper `/usr/local/bin/calamares`, el `.desktop`, `settings.conf`, branding y el módulo `unpackfs.conf` con ruta de raíz acorde a la arquitectura. El resultado `PASS` significa solo que el payload/configuración esperada está presente; no se lanza Calamares ni se prueba la GUI. Una instalación completa sigue pendiente: requiere disco virtual desechable, GUI controlable, bootloader por arquitectura, instalación, revisión de resultados y segundo arranque; nunca se adjuntan discos físicos.
 
 ### D. Pruebas del arnés
 

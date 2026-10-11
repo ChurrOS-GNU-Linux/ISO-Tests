@@ -2,6 +2,28 @@
   "schema_version": 1,
   "project": "ChurrOS",
   "source_repository": "Hoyuse/ChurrOS",
+  "installer_payload": {
+    "rootfs_iso_template": "/churros/{architecture}/airootfs.sfs",
+    "required_files": [
+      "usr/bin/calamares",
+      "usr/local/bin/calamares",
+      "usr/share/applications/calamares.desktop",
+      "etc/calamares/settings.conf",
+      "etc/calamares/branding/churros/branding.desc",
+      "etc/calamares/modules/unpackfs.conf"
+    ],
+    "text_markers": {
+      "usr/local/bin/calamares": ["/usr/bin/calamares", "sudo -n"],
+      "usr/share/applications/calamares.desktop": ["Exec=/usr/local/bin/calamares"],
+      "etc/calamares/settings.conf": ["sequence:", "branding: churros"],
+      "etc/calamares/modules/unpackfs.conf": ["/run/archiso/bootmnt/churros/{architecture}/airootfs.sfs"]
+    }
+  },
+  "uefi_boot_strategy": "embedded_eltorito",
+  "serial_console_paths": {
+    "bios": "/boot/syslinux/archiso_sys-linux.cfg",
+    "uefi": "/boot/grub/grub.cfg"
+  },
   "profiles": {
     "x86_64-niri": {
       "architecture": "x86_64",
