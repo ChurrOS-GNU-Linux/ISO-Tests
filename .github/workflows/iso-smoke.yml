@@ -1,0 +1,68 @@
+name: ChurrOS ISO smoke test
+
+on:
+  workflow_dispatch:
+    inputs:
+      iso_url:
+        description: HTTPS URL for the exact ISO under test
+        required: true
+        type: string
+      expected_sha256:
+        description: Trusted SHA-256 for that exact ISO (64 hexadecimal characters)
+        required: true
+        type: string
+      profile:
+        description: ChurrOS architecture/edition profile
+        required: true
+        type: choice
+        options:
+          - x86_64-niri
+          - x86_64-xfce
+          - x86_64-kde
+          - x86_64-server
+          - aarch64-niri
+
+permissions:
+  contents: read
+
+concurrency:
+  group: isotests-smoke-${{ github.ref }}-${{ inputs.profile }}
+  cancel-in-progress: true
+
+jobs:
+  smoke:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - name: Install ISO inspection, emulation and firmware
+        shell: bash
+        run: |
+          mkdir -p artifacts/iso-test/evidence
+          set -o pipefail
+          {
+            sudo apt-get update &&
+            sudo apt-get install --no-install-recommends -y \
+              xorriso qemu-system-x86 qemu-system-arm ovmf qemu-efi-aarch64
+          } 2>&1 | tee artifacts/iso-test/evidence/dependency-install.log
+      - name: Run static checks and QEMU boot profiles
+        env:
+          ISO_URL: ${{ inputs.iso_url }}
+          EXPECTED_SHA256: ${{ inputs.expected_sha256 }}
+          ISO_PROFILE: ${{ inputs.profile }}
+        run: |
+          python3 scripts/iso_tests.py \
+            --iso-url "$ISO_URL" \
+            --expected-sha256 "$EXPECTED_SHA256" \
+            --profile "$ISO_PROFILE" \
+            --report-dir artifacts/iso-test \
+            --timeout 1200
+      - name: Preserve reports and diagnostics
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: iso-test-${{ inputs.profile }}-${{ github.run_id }}
+          path: artifacts/iso-test/
+          if-no-files-found: warn
+          retention-days: 14

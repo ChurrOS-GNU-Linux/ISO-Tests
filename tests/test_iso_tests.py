@@ -1,0 +1,295 @@
+from __future__ import annotations
+
+import hashlib
+import json
+import os
+import stat
+import tempfile
+import unittest
+from pathlib import Path
+from unittest import mock
+
+import sys
+ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT / "scripts"))
+import iso_tests as it  # noqa: E402
+
+
+class Harness(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory(prefix="iso tests with spaces ")
+        self.root = Path(self.tmp.name)
+        self.reporter = it.Reporter(self.root / "report", "unit-test")
+        self.profile = it.load_profiles()["profiles"]["x86_64-niri"]
+        self.iso = self.root / "unexpected name with spaces.iso"
+        # Explicit harness-only fixture. This is NOT an ISO image: it contains
+        # only a sparse slot and one ISO9660 signature used to exercise parsing.
+        with self.iso.open("wb") as f:
+            f.truncate(32773)
+            f.seek(16 * 2048 + 1)
+            f.write(b"CD001")
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def set_minimum_size(self):
+        self._min = mock.patch.object(it, "MIN_ISO_BYTES", 1)
+        self._min.start()
+        self.addCleanup(self._min.stop)
+
+    def fake_xorriso(self, output_for):
+        bindir = self.root / "fake bin"
+        bindir.mkdir(exist_ok=True)
+        exe = bindir / "xorriso"
+        src = "#!/usr/bin/env python3\nimport sys\na=' '.join(sys.argv[1:])\n"
+        src += "print(" + repr(output_for) + ")\n"
+        exe.write_text(src, encoding="utf-8")
+        exe.chmod(exe.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
+        self._old_path = os.environ.get("PATH", "")
+        os.environ["PATH"] = str(bindir) + os.pathsep + self._old_path
+        self.addCleanup(lambda: os.environ.__setitem__("PATH", self._old_path))
+        return exe
+
+    def fake_qemu(self, body: str, name: str = "qemu-system-x86_64") -> Path:
+        bindir = self.root / "fake qemu bin"
+        bindir.mkdir(exist_ok=True)
+        exe = bindir / name
+        exe.write_text("#!/usr/bin/env python3\n" + body, encoding="utf-8")
+        exe.chmod(exe.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
+        self._old_path = os.environ.get("PATH", "")
+        os.environ["PATH"] = str(bindir) + os.pathsep + self._old_path
+        self.addCleanup(lambda: os.environ.__setitem__("PATH", self._old_path))
+        return exe
+
+    def test_profile_table_matches_real_architectures_and_modes(self):
+        p = it.load_profiles()["profiles"]
+        self.assertEqual({n for n in p if n.startswith("x86_64-")}, {
+            "x86_64-niri", "x86_64-xfce", "x86_64-kde", "x86_64-server"})
+        self.assertEqual(p["aarch64-niri"]["boot_modes"], ["uefi"])
+        self.assertEqual(p["aarch64-niri"]["efi_bootloader"], "BOOTAA64.EFI")
+
+    def test_rejects_empty_profile_table_and_invalid_architecture(self):
+        for data, text in [
+            ({"schema_version": 1, "profiles": {}}, "non-empty"),
+            ({"schema_version": 1, "profiles": {"arm": {"architecture": "armv7"}}}, "missing required"),
+        ]:
+            path = self.root / "bad.json"
+            path.write_text(json.dumps(data), encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, text):
+                it.load_profiles(path)
+
+    def test_rejects_bios_profile_on_aarch64(self):
+        path = self.root / "bad-arm.json"
+        path.write_text(json.dumps({"schema_version": 1, "profiles": {
+            "arm": {"architecture": "aarch64", "edition": "niri", "boot_modes": ["bios"],
+                    "qemu": "qemu-system-aarch64", "serial_device": "ttyAMA0",
+                    "success_patterns": ["Reached target"]}}}), encoding="utf-8")
+        with self.assertRaisesRegex(ValueError, "BIOS is not supported"):
+            it.load_profiles(path)
+
+    def test_nonexistent_artifact_is_failure_not_pass(self):
+        digest, _ = it.validate_iso(self.root / "absent.iso", "x86_64-niri", self.profile,
+                                    self.reporter, None, None, 1)
+        self.assertIsNone(digest)
+        self.assertEqual(self.reporter.tests[0].status, "FAIL")
+        self.assertTrue(all(t.status == "SKIP" for t in self.reporter.tests[1:]))
+
+    def test_empty_artifact_fails_and_is_never_an_iso(self):
+        self.set_minimum_size()
+        self.iso.write_bytes(b"")
+        with mock.patch.object(it.shutil, "which", return_value=None):
+            it.validate_iso(self.iso, "x86_64-niri", self.profile, self.reporter, None, None, 1)
+        by_name = {t.name: t.status for t in self.reporter.tests}
+        self.assertEqual(by_name["artifact_size"], "FAIL")
+        self.assertEqual(by_name["iso9660_primary_volume_descriptor"], "FAIL")
+        self.assertEqual(by_name["xorriso_el_torito"], "BLOCKED")
+
+    def test_corrupt_or_truncated_file_fails_descriptor_test(self):
+        self.set_minimum_size()
+        self.iso.write_bytes(b"not a CD image")
+        with mock.patch.object(it.shutil, "which", return_value=None):
+            it.validate_iso(self.iso, "x86_64-niri", self.profile, self.reporter, None, None, 1)
+        self.assertEqual(next(t.status for t in self.reporter.tests if t.name == "iso9660_primary_volume_descriptor"), "FAIL")
+
+    def test_missing_xorriso_is_blocked_not_skipped_or_pass(self):
+        self.set_minimum_size()
+        with mock.patch.object(it.shutil, "which", return_value=None):
+            it.validate_iso(self.iso, "x86_64-niri", self.profile, self.reporter, None, None, 1)
+        self.assertEqual(next(t.status for t in self.reporter.tests if t.name == "xorriso_el_torito"), "BLOCKED")
+        self.assertEqual(next(t.status for t in self.reporter.tests if t.name == "boot_structure_bios"), "BLOCKED")
+
+    def test_actual_hash_is_reported_but_not_misrepresented_as_published_checksum(self):
+        self.set_minimum_size()
+        with mock.patch.object(it.shutil, "which", return_value=None):
+            digest, _ = it.validate_iso(self.iso, "x86_64-niri", self.profile, self.reporter, None, None, 1)
+        self.assertEqual(digest, hashlib.sha256(self.iso.read_bytes()).hexdigest())
+        self.assertEqual(next(t.status for t in self.reporter.tests if t.name == "published_checksum"), "SKIP")
+
+    def test_checksum_mismatch_is_failure(self):
+        self.set_minimum_size()
+        expected = "0" * 64
+        with mock.patch.object(it.shutil, "which", return_value=None):
+            it.validate_iso(self.iso, "x86_64-niri", self.profile, self.reporter, expected, None, 1)
+        self.assertEqual(next(t.status for t in self.reporter.tests if t.name == "published_checksum"), "FAIL")
+
+    def test_sha256sums_requires_exact_unambiguous_basename(self):
+        sums = self.root / "SHA256SUMS"
+        sums.write_text("a" * 64 + "  wrong-file.iso\n", encoding="utf-8")
+        with self.assertRaisesRegex(ValueError, "found 0"):
+            it.parse_sha256sums(sums, self.iso)
+        sums.write_text("a" * 64 + "  " + self.iso.name + "\n" + "b" * 64 + "  " + self.iso.name + "\n", encoding="utf-8")
+        with self.assertRaisesRegex(ValueError, "found 2"):
+            it.parse_sha256sums(sums, self.iso)
+
+    def test_static_validator_detects_boot_catalog_and_efi_loader(self):
+        self.set_minimum_size()
+        self.fake_xorriso("El Torito catalog : 23 1\\nEl Torito boot img : 24 4 BIOS y none\\nEl Torito boot img : 25 1 UEFI y none\\n/EFI/BOOT/BOOTX64.EFI")
+        it.validate_iso(self.iso, "x86_64-niri", self.profile, self.reporter, None, None, 2)
+        by_name = {t.name: t.status for t in self.reporter.tests}
+        self.assertEqual(by_name["xorriso_el_torito"], "PASS")
+        self.assertEqual(by_name["boot_structure_bios"], "PASS")
+        self.assertEqual(by_name["boot_structure_uefi"], "PASS")
+        self.assertEqual(by_name["efi_bootloader_file"], "PASS")
+
+    def test_static_validator_rejects_missing_expected_uefi_entry_and_loader(self):
+        self.set_minimum_size()
+        self.fake_xorriso("El Torito catalog : 23 1\\nEl Torito boot img : 24 4 BIOS y none\\nno efi path")
+        it.validate_iso(self.iso, "x86_64-niri", self.profile, self.reporter, None, None, 2)
+        by_name = {t.name: t.status for t in self.reporter.tests}
+        self.assertEqual(by_name["boot_structure_uefi"], "FAIL")
+        self.assertEqual(by_name["efi_bootloader_file"], "FAIL")
+
+    def test_xorriso_timeout_is_failure_and_log_is_kept(self):
+        self.set_minimum_size()
+        self.fake_xorriso("import time; time.sleep(10)")
+        it.validate_iso(self.iso, "x86_64-niri", self.profile, self.reporter, None, None, 0.1)
+        result = next(t for t in self.reporter.tests if t.name == "xorriso_el_torito")
+        self.assertEqual(result.status, "FAIL")
+        self.assertTrue((self.reporter.report_dir / result.log_path).exists())
+
+    def _qemu_profile(self, modes=("bios",)):
+        profile = dict(self.profile)
+        profile["boot_modes"] = list(modes)
+        return profile
+
+    def test_missing_qemu_is_blocked(self):
+        with mock.patch.object(it.shutil, "which", return_value=None):
+            it.run_boot_test(self.iso, "x86_64-niri", self._qemu_profile(), "bios", self.reporter, 1, (None, None))
+        self.assertEqual(self.reporter.tests[-1].status, "BLOCKED")
+
+    def test_qemu_timeout_without_marker_is_failure(self):
+        self.fake_qemu("import time\ntime.sleep(10)\n")
+        it.run_boot_test(self.iso, "x86_64-niri", self._qemu_profile(), "bios", self.reporter, 0.2, (None, None))
+        self.assertEqual(self.reporter.tests[-1].status, "FAIL")
+        self.assertIn("without a configured", self.reporter.tests[-1].message)
+
+    def test_qemu_error_exit_without_marker_is_failure(self):
+        self.fake_qemu("import sys\nprint('emulator error')\nsys.exit(23)\n")
+        it.run_boot_test(self.iso, "x86_64-niri", self._qemu_profile(), "bios", self.reporter, 2, (None, None))
+        self.assertEqual(self.reporter.tests[-1].status, "FAIL")
+        self.assertIn("exit 23", self.reporter.tests[-1].message)
+
+    def test_qemu_requires_profile_marker_and_records_serial_evidence(self):
+        self.fake_qemu("import sys,time\na=sys.argv\np=a[a.index('-serial')+1].split(':',1)[1]\nopen(p,'w').write('systemd[1]: Reached target Graphical Interface.\\n')\ntime.sleep(10)\n")
+        it.run_boot_test(self.iso, "x86_64-niri", self._qemu_profile(), "bios", self.reporter, 2, (None, None))
+        self.assertEqual(self.reporter.tests[-1].status, "PASS")
+        self.assertTrue((self.reporter.report_dir / self.reporter.tests[-1].log_path).exists())
+
+    def test_unsupported_profile_mode_fails(self):
+        p = dict(self.profile)
+        p["architecture"] = "aarch64"
+        p["boot_modes"] = ["uefi"]
+        it.run_boot_test(self.iso, "bad", p, "bios", self.reporter, 1, (None, None))
+        self.assertEqual(self.reporter.tests[-1].status, "FAIL")
+
+    def test_uefi_firmware_requires_matching_code_and_vars_and_uses_copy(self):
+        code = self.root / "code.fd"
+        vars_file = self.root / "vars.fd"
+        code.write_bytes(b"C" * 4096)
+        vars_file.write_bytes(b"V" * 4096)
+        self.assertEqual(it.discover_firmware("x86_64", str(code), str(vars_file)), (code, vars_file))
+        vars_file.write_bytes(b"short")
+        with self.assertRaisesRegex(ValueError, "equal sizes"):
+            it.discover_firmware("x86_64", str(code), str(vars_file))
+
+    def test_remote_download_requires_https_and_checksum_and_cleans_mismatch(self):
+        dst = self.root / "download.iso"
+        with self.assertRaisesRegex(ValueError, "HTTPS"):
+            it.download_iso("http://example.invalid/image.iso", dst, "a" * 64, 1)
+        self.assertFalse(dst.exists())
+        with mock.patch.object(it.urllib.request, "urlopen", side_effect=OSError("network unavailable")):
+            with self.assertRaisesRegex(OSError, "network unavailable"):
+                it.download_iso("https://example.invalid/image.iso", dst, "a" * 64, 1)
+        self.assertFalse(dst.exists())
+
+    def test_download_checksum_mismatch_cleans_its_partial_file_only(self):
+        payload = b"downloaded content"
+        response = mock.MagicMock()
+        response.__enter__.return_value = response
+        response.geturl.return_value = "https://example.invalid/image.iso"
+        response.headers = {"Content-Length": str(len(payload))}
+        response.read.side_effect = [payload, b""]
+        dst = self.root / "download.iso"
+        with mock.patch.object(it.urllib.request, "urlopen", return_value=response):
+            with self.assertRaisesRegex(ValueError, "does not match"):
+                it.download_iso("https://example.invalid/image.iso?token=secret", dst, "0" * 64, 1)
+        self.assertFalse(dst.exists())
+
+    def test_download_never_overwrites_or_deletes_preexisting_file(self):
+        dst = self.root / "download.iso"
+        dst.write_bytes(b"keep me")
+        payload = b"new payload"
+        response = mock.MagicMock()
+        response.__enter__.return_value = response
+        response.geturl.return_value = "https://example.invalid/image.iso"
+        response.headers = {"Content-Length": str(len(payload))}
+        response.read.side_effect = [payload, b""]
+        with mock.patch.object(it.urllib.request, "urlopen", return_value=response):
+            with self.assertRaises(FileExistsError):
+                it.download_iso("https://example.invalid/image.iso", dst, hashlib.sha256(payload).hexdigest(), 1)
+        self.assertEqual(dst.read_bytes(), b"keep me")
+
+    def test_report_has_explicit_status_counts_and_tool_versions(self):
+        self.reporter.add("fixture_test", "SKIP", "not run", __import__("time").monotonic())
+        path = self.reporter.write(artifact={"name": self.iso.name}, profile="unit-fixture",
+                                  architecture="x86_64", modes=["bios"], tool_versions={"python": "test"})
+        report = json.loads(path.read_text(encoding="utf-8"))
+        self.assertEqual(report["summary"]["SKIP"], 1)
+        self.assertEqual(report["tests"][0]["status"], "SKIP")
+        self.assertIn("run_id", report)
+
+    def test_run_command_does_not_use_shell_and_timeout_terminates_child(self):
+        exe = self.root / "slow tool.py"
+        exe.write_text("#!/usr/bin/env python3\nimport time\ntime.sleep(10)\n", encoding="utf-8")
+        exe.chmod(exe.stat().st_mode | stat.S_IXUSR)
+        log = self.root / "command.log"
+        rc, _out, err = it.run_command([str(exe), "name with spaces; not shell"], 0.1, log)
+        self.assertIsNone(rc)
+        self.assertIn("timed out", err)
+        self.assertTrue(log.exists())
+
+    def test_interruption_leaves_no_downloaded_artifact_and_writes_report(self):
+        report_dir = self.root / "interrupted report"
+        def interrupted(_url, destination, _sha, _timeout):
+            destination.write_bytes(b"partial")
+            raise KeyboardInterrupt("test interrupt")
+        with mock.patch.object(it, "download_iso", side_effect=interrupted):
+            rc = it.main(["--iso-url", "https://example.invalid/image.iso", "--expected-sha256", "a" * 64,
+                          "--profile", "x86_64-niri", "--no-boot", "--report-dir", str(report_dir)])
+        self.assertEqual(rc, 130)
+        self.assertEqual(list(report_dir.glob(".iso-download-*")), [])
+        self.assertTrue((report_dir / "report.json").exists())
+        report = json.loads((report_dir / "report.json").read_text(encoding="utf-8"))
+        self.assertIn("execution", [t["name"] for t in report["tests"]])
+
+    def test_cli_unknown_profile_fails_and_preserves_structured_diagnostics(self):
+        report_dir = self.root / "bad profile output"
+        rc = it.main([str(self.iso), "--profile", "unknown", "--report-dir", str(report_dir)])
+        self.assertEqual(rc, 2)
+        report = json.loads((report_dir / "report.json").read_text(encoding="utf-8"))
+        self.assertEqual(report["tests"][0]["status"], "FAIL")
+        self.assertIn("unknown profile", report["tests"][0]["message"])
+
+
+if __name__ == "__main__":
+    unittest.main()

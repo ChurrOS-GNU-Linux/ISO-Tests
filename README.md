@@ -1,2 +1,111 @@
-# ISO-Tests
-Automated static and QEMU boot testing for ChurrOS GNU/Linux ISO images
+# ISO-Tests para ChurrOS GNU/Linux
+
+Herramientas de validación estática y pruebas de humo QEMU para ISOs reales de ChurrOS. No construye la distribución ni sustituye `./churros check`, la CI de Rust o los tests internos ya presentes en ChurrOS.
+
+> **Estado de esta entrega:** el código y las pruebas del arnés son locales y ejecutables. No se creó este repositorio en GitHub: el token inspeccionado no tiene permisos de escritura en `ChurrOS-GNU-Linux`. Véase [`docs/audit.md`](docs/audit.md). Ninguna ISO real se declaró validada en este entorno.
+
+## Qué comprueba
+
+- Archivo normal, presente, no vacío y de 64 MiB a 16 GiB; SHA-256 calculado.
+- Firma del descriptor primario ISO9660 (`CD001`, bloque lógico 16); `xorriso` examina el catálogo El Torito, el área de sistema y el árbol de archivos.
+- Modos de arranque respaldados por el perfil del proyecto: BIOS/Syslinux y UEFI/GRUB para x86_64; UEFI/GRUB para aarch64. Se exige además la ruta EFI fallback por arquitectura.
+- Si se aporta un checksum de referencia confiable, compara el hash; si no, informa `SKIP` (no convierte el hash calculado en verificación de autenticidad).
+- QEMU sin NIC, sin discos persistentes, en TCG; prueba cada modo declarado y solo aprueba al observar el marcador systemd configurado en la consola serie. El timeout sin marcador es `FAIL`.
+- Informe JSON, salida de herramientas y logs serie/QEMU con estados `PASS`, `FAIL`, `SKIP` y `BLOCKED`.
+
+El marcador actual demuestra que systemd alcanzó un target de arranque en vivo. **No prueba visualmente el escritorio**, la conexión de red, el funcionamiento de todas las aplicaciones ni una instalación completa. Véase [`docs/design.md`](docs/design.md).
+
+## Requisitos
+
+- Python 3.10+; el código no requiere paquetes Python externos.
+- Para validación completa: `xorriso`.
+- Para QEMU x86_64: `qemu-system-x86_64`; para aarch64: `qemu-system-aarch64` y firmware AAVMF/UEFI compatible.
+- Para UEFI x86_64: firmware OVMF compatible. El script detecta rutas usuales o acepta rutas explícitas.
+- Espacio temporal para logs y variables UEFI; la ISO permanece de solo lectura y no se monta en el host.
+
+Ejemplo en Arch Linux: `sudo pacman -S --needed xorriso qemu-full edk2-ovmf edk2-aarch64` (verifica los nombres de paquete disponibles en tu repositorio). En Ubuntu/Debian, instala `xorriso`, `qemu-system-x86`, `qemu-system-arm`, `ovmf` y el paquete de firmware AArch64 publicado por tu versión.
+
+## Uso local
+
+Usa una ISO producida por el build de ChurrOS (`out/*.iso`) o un archivo de publicación confiable. Los comandos de construcción oficiales auditados son `./churros build` y sus variantes; ISO-Tests no adivina ni reconstruye esos artefactos.
+
+Prueba todos los modos de arranque implementados por el perfil:
+
+```bash
+python3 scripts/iso_tests.py '/ruta/con espacios/ChurrOS-....iso' \
+  --profile x86_64-niri --report-dir artifacts/niri
+```
+
+Perfiles disponibles: `x86_64-niri`, `x86_64-xfce`, `x86_64-kde`, `x86_64-server` y `aarch64-niri`. La tabla se mantiene en [`profiles/churros.json`](profiles/churros.json).
+
+Validación estática solamente: los arranques aparecerán como `SKIP`, nunca como aprobados.
+
+```bash
+python3 scripts/iso_tests.py ./out/imagen.iso --profile x86_64-niri \
+  --no-boot --report-dir artifacts/static
+```
+
+Compara contra un manifiesto publicado que contenga una línea con el **nombre exacto** del ISO:
+
+```bash
+python3 scripts/iso_tests.py ./out/imagen.iso --profile x86_64-niri \
+  --sha256sums ./SHA256SUMS --report-dir artifacts/release
+```
+
+Para descargar por HTTPS, es obligatorio proporcionar el hash confiable obtenido por un canal independiente:
+
+```bash
+python3 scripts/iso_tests.py --iso-url 'https://servidor/imagen.iso' \
+  --expected-sha256 '<64 caracteres hexadecimales>' \
+  --profile aarch64-niri --report-dir artifacts/arm64
+```
+
+La URL debe ser HTTPS, no puede incluir credenciales y la descarga se elimina al terminar. Límite de tamaño: 16 GiB. Sin referencia confiable el informe deja checksum como `SKIP`.
+
+### Firmware UEFI no detectado
+
+Pasa ambos archivos OVMF/AAVMF de una pareja compatible; el arnés comprueba que tengan el mismo tamaño y copia VARS a un archivo temporal desechable:
+
+```bash
+python3 scripts/iso_tests.py ./out/imagen.iso --profile x86_64-niri \
+  --uefi-code /ruta/OVMF_CODE.fd --uefi-vars /ruta/OVMF_VARS.fd
+```
+
+Nunca se modifica el archivo VARS original. El modo `BIOS` usa firmware BIOS de QEMU y no necesita OVMF.
+
+## Resultados y códigos de salida
+
+`artifacts/.../report.json` registra la ejecución, artefacto/hash, perfil, arquitectura, versiones de herramientas, pruebas, tiempos, estado, motivos de bloqueo y rutas de evidencia. Los logs están bajo `evidence/`.
+
+- `0`: todas las pruebas ejecutadas pasaron o se omitieron explícitamente; revisa los `SKIP`.
+- `1`: al menos un `FAIL` o `BLOCKED`.
+- `2`: perfil/argumentos/configuración inválidos.
+- `130`: interrupción; el arnés intenta finalizar el grupo de procesos QEMU y escribe el informe.
+
+Un estado `BLOCKED` nunca equivale a éxito. Si falta `xorriso`, QEMU o firmware, el resultado correspondiente queda bloqueado y el proceso termina distinto de cero.
+
+## GitHub Actions
+
+- `unit-tests.yml`: tests del arnés en cada pull request; permiso `contents: read`.
+- `iso-smoke.yml`: ejecución manual (`workflow_dispatch`) con URL HTTPS, SHA-256 esperado y perfil explícitos; instala `xorriso`, QEMU y firmware en el runner, conserva informe y logs aun si falla.
+
+La acción manual solo prueba el artefacto cuya URL y hash entrega la persona que la dispara. No se configuró descarga automática desde otro repositorio: no se puede agregar ni autorizar integración en el upstream ni crear este repositorio en la organización con los permisos disponibles. El build upstream tiene un artefacto de Actions aarch64 de vida limitada; coordinar una integración futura con `Hoyuse/ChurrOS` para que un evento confiable transfiera el ID del run y se descargue con permisos mínimos.
+
+## Tests del arnés
+
+Las pruebas unitarias usan archivos sintéticos pequeños y ejecutables falsos bajo directorios temporales para ejercitar errores, timeouts y parsing. **No son ISO de ChurrOS, no pasan por un arranque real ni cuentan como evidencia de arranque.**
+
+```bash
+python3 -m unittest discover -s tests -v
+python3 -m py_compile scripts/iso_tests.py tests/test_iso_tests.py
+```
+
+## Limitaciones actuales
+
+- No hay perfil gráfico visual automatizado; la salida serie comprueba solo un target systemd.
+- No se automatiza Calamares ni una instalación completa en disco virtual; abrir el instalador no prueba instalación.
+- No hay un checksum publicado verificado para la ISO activa en este entorno.
+- QEMU, `xorriso`, firmware y una ISO real no están instalados/disponibles en este sandbox; no se ejecutó ningún boot de ChurrOS aquí.
+- La organización aún no alberga este repositorio; workflows aquí descritos son archivos locales, no workflows activos.
+
+Detalles de auditoría y arquitectura: [`docs/audit.md`](docs/audit.md), [`docs/design.md`](docs/design.md).
