@@ -8,9 +8,14 @@ on:
         required: true
         type: string
       expected_sha256:
-        description: Trusted SHA-256 for that exact ISO (64 hexadecimal characters)
-        required: true
+        description: Trusted SHA-256 if published (64 hexadecimal characters)
+        required: false
         type: string
+      allow_unverified_download:
+        description: Explicitly accept HTTPS without a published trusted checksum; checksum status will be SKIP
+        required: false
+        type: boolean
+        default: false
       profile:
         description: ChurrOS architecture/edition profile
         required: true
@@ -50,14 +55,19 @@ jobs:
         env:
           ISO_URL: ${{ inputs.iso_url }}
           EXPECTED_SHA256: ${{ inputs.expected_sha256 }}
+          ALLOW_UNVERIFIED: ${{ inputs.allow_unverified_download }}
           ISO_PROFILE: ${{ inputs.profile }}
         run: |
-          python3 scripts/iso_tests.py \
-            --iso-url "$ISO_URL" \
-            --expected-sha256 "$EXPECTED_SHA256" \
-            --profile "$ISO_PROFILE" \
-            --report-dir artifacts/iso-test \
-            --timeout 900
+          common=(python3 scripts/iso_tests.py --iso-url "$ISO_URL" --profile "$ISO_PROFILE" \
+            --report-dir artifacts/iso-test --timeout 900)
+          if [[ -n "$EXPECTED_SHA256" ]]; then
+            "${common[@]}" --expected-sha256 "$EXPECTED_SHA256"
+          elif [[ "$ALLOW_UNVERIFIED" == "true" ]]; then
+            "${common[@]}" --allow-unverified-download
+          else
+            echo 'Provide a trusted checksum or explicitly enable unverified HTTPS download.' >&2
+            exit 2
+          fi
       - name: Preserve reports and diagnostics
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2

@@ -249,6 +249,45 @@ class Harness(unittest.TestCase):
                 it.download_iso("https://example.invalid/image.iso", dst, "a" * 64, 1)
         self.assertFalse(dst.exists())
 
+    def test_unverified_https_download_computes_but_does_not_assert_a_trusted_hash(self):
+        payload = b"fixture bytes, not an ISO"
+        response = mock.MagicMock()
+        response.__enter__.return_value = response
+        response.geturl.return_value = "https://example.invalid/image.iso"
+        response.headers = {"Content-Length": str(len(payload))}
+        response.read.side_effect = [payload, b""]
+        dst = self.root / "unverified download.iso"
+        with mock.patch.object(it.urllib.request, "urlopen", return_value=response):
+            digest = it.download_iso("https://example.invalid/image.iso", dst, None, 1)
+        self.assertEqual(digest, hashlib.sha256(payload).hexdigest())
+        self.assertEqual(dst.read_bytes(), payload)
+
+    def test_download_url_requires_hash_or_explicit_unverified_opt_in(self):
+        report_dir = self.root / "no hash report"
+        rc = it.main(["--iso-url", "https://example.invalid/image.iso", "--profile", "x86_64-niri",
+                      "--report-dir", str(report_dir)])
+        self.assertEqual(rc, 2)
+        report = json.loads((report_dir / "report.json").read_text(encoding="utf-8"))
+        self.assertIn("exactly one", report["tests"][0]["message"])
+
+    def test_unverified_cli_marks_checksum_skip_and_cleans_download(self):
+        payload = b"untrusted synthetic bytes"
+        response = mock.MagicMock()
+        response.__enter__.return_value = response
+        response.geturl.return_value = "https://example.invalid/image.iso"
+        response.headers = {"Content-Length": str(len(payload))}
+        response.read.side_effect = [payload, b""]
+        report_dir = self.root / "unverified report"
+        with mock.patch.object(it.urllib.request, "urlopen", return_value=response), mock.patch.object(it.shutil, "which", return_value=None):
+            rc = it.main(["--iso-url", "https://example.invalid/image.iso", "--allow-unverified-download",
+                          "--profile", "x86_64-niri", "--no-boot", "--report-dir", str(report_dir)])
+        self.assertEqual(rc, 1)  # fixture is intentionally not a plausible ISO
+        report = json.loads((report_dir / "report.json").read_text(encoding="utf-8"))
+        by_name = {t["name"]: t["status"] for t in report["tests"]}
+        self.assertEqual(by_name["artifact_download"], "PASS")
+        self.assertEqual(by_name["published_checksum"], "SKIP")
+        self.assertEqual(list(report_dir.glob(".iso-download-*")), [])
+
     def test_download_checksum_mismatch_cleans_its_partial_file_only(self):
         payload = b"downloaded content"
         response = mock.MagicMock()

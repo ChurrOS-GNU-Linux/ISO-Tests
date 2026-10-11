@@ -45,4 +45,4 @@ No se ejecuta Calamares en esta versión. ChurrOS tiene configuración propia de
 
 ## Integración
 
-La comprobación PR corre solo los tests del harness. Smoke test manual exige URL HTTPS y SHA-256 antes de descargar; su host runner necesita conectividad para obtener la ISO, pero la VM no tiene red. El artifact de Actions upstream es de vida limitada y cross-repo; integración automática necesita un cambio coordinado aprobado en el repositorio builder o un evento/token con `actions:read` de mínimo alcance. Ningún cambio upstream se hizo por este bloqueo/alcance.
+La comprobación PR corre los tests del harness. El smoke test manual exige URL HTTPS y perfil; si existe checksum publicado se pasa como SHA-256. Sin referencia, solo se descarga con una opción explícita y el reporte mantiene `published_checksum=SKIP`. El runner necesita conectividad para obtener la ISO, pero la VM no tiene red. Los artifacts upstream de Actions son de vida limitada y cross-repo; integración automática necesita un cambio coordinado aprobado en el repositorio builder o un evento/token con `actions:read` de mínimo alcance. Ningún cambio upstream se hizo.

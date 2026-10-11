@@ -52,7 +52,7 @@ python3 scripts/iso_tests.py ./out/imagen.iso --profile x86_64-niri \
   --sha256sums ./SHA256SUMS --report-dir artifacts/release
 ```
 
-Para descargar por HTTPS, es obligatorio proporcionar el hash confiable obtenido por un canal independiente:
+Para descargar por HTTPS y verificar con el hash confiable publicado por un canal independiente:
 
 ```bash
 python3 scripts/iso_tests.py --iso-url 'https://servidor/imagen.iso' \
@@ -60,7 +60,14 @@ python3 scripts/iso_tests.py --iso-url 'https://servidor/imagen.iso' \
   --profile aarch64-niri --report-dir artifacts/arm64
 ```
 
-La URL debe ser HTTPS, no puede incluir credenciales y la descarga se elimina al terminar. Límite de tamaño: 16 GiB. Sin referencia confiable el informe deja checksum como `SKIP`.
+Si no existe un checksum confiable publicado, puedes optar **explícitamente** por probar el archivo servido por HTTPS sin atribuirle autenticidad criptográfica:
+
+```bash
+python3 scripts/iso_tests.py --iso-url 'https://servidor/imagen.iso' --allow-unverified-download \\
+  --profile x86_64-niri --report-dir artifacts/unverified
+```
+
+En este modo se calcula y registra SHA-256 pero `published_checksum` queda `SKIP`. La URL debe ser HTTPS, no puede incluir credenciales y la descarga temporal se elimina al terminar. Límite de tamaño: 16 GiB.
 
 ### Firmware UEFI no detectado
 
@@ -87,9 +94,9 @@ Un estado `BLOCKED` nunca equivale a éxito. Si falta `xorriso`, QEMU o firmware
 ## GitHub Actions
 
 - `unit-tests.yml`: tests del arnés en cada pull request; permiso `contents: read`.
-- `iso-smoke.yml`: ejecución manual (`workflow_dispatch`) con URL HTTPS, SHA-256 esperado y perfil explícitos; instala `xorriso`, QEMU y firmware en el runner, conserva informe y logs aun si falla.
+- `iso-smoke.yml`: ejecución manual (`workflow_dispatch`) con URL HTTPS y perfil; acepta SHA-256 confiable o requiere marcar explícitamente la opción de descarga sin checksum. En este último caso el checksum queda `SKIP`; instala `xorriso`, QEMU y firmware, conserva informe y logs aun si falla.
 
-La acción manual solo prueba el artefacto cuya URL y hash entrega la persona que la dispara. No se configuró descarga automática desde otro repositorio: no se puede agregar ni autorizar integración en el upstream ni crear este repositorio en la organización con los permisos disponibles. El build upstream tiene un artefacto de Actions aarch64 de vida limitada; coordinar una integración futura con `Hoyuse/ChurrOS` para que un evento confiable transfiera el ID del run y se descargue con permisos mínimos.
+La acción manual prueba el artefacto indicado por quien la dispara. Si hay un checksum publicado, debe proporcionarse; sin él, solo se puede proceder con la opción explícita de HTTPS no verificado y el informe mantiene el checksum como `SKIP`. No se configuró descarga automática desde otro repositorio: el build upstream tiene artifacts de Actions aarch64 de vida limitada; una integración futura requiere coordinar en `Hoyuse/ChurrOS` un evento confiable y permisos mínimos.
 
 ## Tests del arnés
 

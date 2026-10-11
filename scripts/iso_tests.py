@@ -545,9 +545,9 @@ def run_boot_test(iso: Path, profile_name: str, profile: dict[str, Any], mode: s
             var_tmp.cleanup()
 
 
-def download_iso(url: str, destination: Path, expected_sha256: str, timeout: float) -> str:
-    if not SHA256_RE.fullmatch(expected_sha256):
-        raise ValueError("remote ISO requires an expected SHA-256 of exactly 64 hex characters")
+def download_iso(url: str, destination: Path, expected_sha256: str | None, timeout: float) -> str:
+    if expected_sha256 is not None and not SHA256_RE.fullmatch(expected_sha256):
+        raise ValueError("expected SHA-256 must contain exactly 64 hexadecimal characters")
     parsed = urllib.parse.urlsplit(url)
     if parsed.scheme != "https" or not parsed.hostname or parsed.username or parsed.password:
         raise ValueError("ISO URL must be HTTPS and must not contain embedded credentials")
@@ -578,7 +578,7 @@ def download_iso(url: str, destination: Path, expected_sha256: str, timeout: flo
         if total == 0:
             raise ValueError("download returned an empty file")
         digest = h.hexdigest()
-        if digest.lower() != expected_sha256.lower():
+        if expected_sha256 is not None and digest.lower() != expected_sha256.lower():
             raise ValueError("downloaded ISO SHA-256 does not match the supplied expected value")
         return digest
     except BaseException:
@@ -600,7 +600,9 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Validate and smoke-test ChurrOS ISO images")
     parser.add_argument("iso", nargs="?", help="path to an authentic ISO; mutually exclusive with --iso-url")
     parser.add_argument("--iso-url", help="download an ISO via HTTPS (requires --expected-sha256)")
-    parser.add_argument("--expected-sha256", help="trusted expected SHA-256; required for --iso-url")
+    parser.add_argument("--expected-sha256", help="trusted expected SHA-256 for the downloaded ISO")
+    parser.add_argument("--allow-unverified-download", action="store_true",
+                        help="explicitly allow HTTPS download without a trusted hash; report checksum as SKIP")
     parser.add_argument("--sha256sums", type=Path, help="published SHA256SUMS file containing the exact ISO basename")
     parser.add_argument("--profile", required=True, help="profile key from profiles/churros.json")
     parser.add_argument("--profiles", type=Path, default=DEFAULT_PROFILES, help=argparse.SUPPRESS)
@@ -636,8 +638,10 @@ def main(argv: list[str] | None = None) -> int:
             raise ValueError("timeouts must be positive; QEMU timeout cannot exceed 1800 seconds")
         if bool(args.iso) == bool(args.iso_url):
             raise ValueError("provide exactly one ISO path or --iso-url")
-        if args.iso_url and not args.expected_sha256:
-            raise ValueError("--iso-url requires --expected-sha256")
+        if args.iso_url and bool(args.expected_sha256) == bool(args.allow_unverified_download):
+            raise ValueError("--iso-url requires exactly one of --expected-sha256 or --allow-unverified-download")
+        if args.allow_unverified_download and not args.iso_url:
+            raise ValueError("--allow-unverified-download only applies with --iso-url")
         if args.iso_url and args.sha256sums:
             raise ValueError("use --expected-sha256 for --iso-url; --sha256sums applies to local ISO basenames")
         if args.expected_sha256 and args.sha256sums:
@@ -661,10 +665,16 @@ def main(argv: list[str] | None = None) -> int:
             downloaded = download_temp_dir / "image.iso"
             started = time.monotonic()
             try:
-                digest = download_iso(args.iso_url, downloaded, args.expected_sha256, args.download_timeout)
-                reporter.add("artifact_download", "PASS", f"Downloaded {downloaded.stat().st_size} bytes; SHA-256 verified", started,
+                digest = download_iso(args.iso_url, downloaded, args.expected_sha256 or None, args.download_timeout)
+                if args.expected_sha256:
+                    download_message = f"Downloaded {downloaded.stat().st_size} bytes; expected SHA-256 matched"
+                    download_log = "HTTPS download completed; expected SHA-256 matched.\n"
+                else:
+                    download_message = f"Downloaded {downloaded.stat().st_size} bytes over HTTPS; no trusted checksum supplied"
+                    download_log = "HTTPS download completed; digest computed only; published checksum remains SKIP.\n"
+                reporter.add("artifact_download", "PASS", download_message, started,
                              reporter.evidence_dir / "download.log")
-                (reporter.evidence_dir / "download.log").write_text("HTTPS download completed; expected SHA-256 matched.\n", encoding="utf-8")
+                (reporter.evidence_dir / "download.log").write_text(download_log, encoding="utf-8")
                 iso = downloaded
             except Exception as e:
                 if isinstance(e, urllib.error.HTTPError):

@@ -6,12 +6,12 @@
 
 | Recurso | Evidencia observada | Consecuencia |
 |---|---|---|
-| Organización `ChurrOS-GNU-Linux` | Repositorios públicos `Brand-Book`, `Installer`, `Software`; la lista de repositorios accesible no incluye `ISO-Tests`. | No se encontró repo público con ese nombre. |
-| `ChurrOS-GNU-Linux/ISO-Tests` | Consulta autenticada a GitHub API respondió `404 Not Found`. | No es visible con la cuenta conectada; GitHub puede ocultar a usuarios sin acceso la existencia de repos privados, por tanto esto **no prueba su inexistencia privada**. |
-| Permisos efectivos en `Installer`, `Software` y `Brand-Book` | GitHub API mostró `pull: true`, `push/admin: false`. | No puedo crear repositorios ni cambiar workflows en la organización. |
-| `Hoyuse/ChurrOS` | GitHub API mostró `push: true`, rama predeterminada `main`. | Hay lectura y escritura del bot en este repositorio, pero la solicitud no autoriza cambios allí y el alcance solicitado es otro repositorio. No se modificó. |
+| Organización `ChurrOS-GNU-Linux` | Al inicio, los repositorios públicos accesibles eran `Brand-Book`, `Installer` y `Software`; una consulta previa devolvió 404 para ISO-Tests. | Se continuó comprobando permisos con el token guardado antes de crear nada. |
+| `ChurrOS-GNU-Linux/ISO-Tests` | La creación autenticada con GitHub API tuvo éxito el 2026-10-11 y el repo quedó público. | URL: `https://github.com/ChurrOS-GNU-Linux/ISO-Tests`. |
+| Permisos efectivos en `Installer`, `Software` y `Brand-Book` | GitHub API mostró `pull: true`, `push/admin: false`; la operación de creación del repositorio sí fue aceptada. | Puedo crear el nuevo repo, pero no modificar esos repos existentes ni habilitar por mi cuenta un evento en el builder upstream. |
+| `Hoyuse/ChurrOS` | GitHub API mostró `push: true`, rama predeterminada `main`. | Se auditó; no se modificó. |
 
-La cuenta conectada responde como `CRISTOP-bot`. No se intentó crear un repo fuera de la organización ni alterar el proyecto upstream para eludir el bloqueo. No hay rama remota ni pull request de ISO-Tests.
+La cuenta conectada responde como `CRISTOP-bot`. La implementación quedó en `feat/iso-test-framework` con PR abierto hacia `main`; la rama principal solo tiene el commit inicial generado al crear el repositorio.
 
 ## Build y artefactos
 
@@ -22,6 +22,7 @@ La documentación de `Hoyuse/ChurrOS` describe una distribución Arch Linux basa
 - En la consulta de Actions del 2026-10-11 había dos artifacts `churros-aarch64-iso`, cada uno de 2,166,294,702 bytes, creados el 2026-10-09. Son artifacts de CI caducables, no una publicación estable. No se descargaron: este entorno carece de `xorriso` y QEMU.
 - Releases observados: v0.6 tiene archivos 7z multipartes x86_64 y `SHA256SUMS`; el manifiesto es referencia válida solo tras obtener el ISO/partes y comprobar que la entrada corresponde al archivo probado. Otras releases tienen distintos paquetes. La documentación del proyecto dice que la publicación actual de ISO y `SHA256SUMS` es manual; no se encontró un workflow que suministre ISO x86_64 automáticamente como artifact.
 - No se encontró un procedimiento probado para acceder desde un workflow nuevo a artifacts de otra organización/repo con `GITHUB_TOKEN` propio. Requiere acuerdo/permisos upstream o ingreso manual URL+hash; no se descarga silenciosamente “latest”.
+- El índice HTTPS oficial `https://download.churroslinux.org/` muestra ChurrOS 2026.09.24 x86_64 Niri/XFCE 1.2 (aprox. 2 GB). El `sha256sums.txt` del índice está fechado 2026-07-23, así que no es un checksum publicado vigente para esas imágenes; no se debe afirmar integridad autenticada con ese fichero.
 
 ## Arquitecturas, ediciones y arranque
 
