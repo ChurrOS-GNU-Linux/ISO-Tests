@@ -10,10 +10,10 @@ Las llamadas a herramientas usan vectores `argv` sin shell, entorno mínimo sin 
 
 ### A. ISO estática
 
-1. Verifica archivo normal/no vacío y límites 64 MiB–16 GiB.
+1. Verifica archivo normal/no vacío y límites 64 MiB–16 GiB; en descargas compara bytes recibidos con `Content-Length` cuando el servidor lo informa.
 2. Calcula SHA-256 en streaming.
 3. Compara contra `--expected-sha256` o una entrada inequívoca de `--sha256sums`. Sin referencia: `published_checksum=SKIP`.
-4. Exige `CD001` en el descriptor primario ISO9660 del bloque 16.
+4. Valida `CD001`, tamaño de bloque y campos dual-endian del descriptor primario ISO9660 en el bloque 16; el volumen declarado no puede exceder el tamaño físico del artefacto.
 5. `xorriso -report_el_torito plain` debe encontrar entradas boot El Torito para cada modo del perfil; `-report_system_area plain` conserva diagnóstico.
 6. Valida el mecanismo UEFI declarado. Para `embedded_eltorito`, el catálogo debe reportar imagen UEFI; `efi_bootloader_file=SKIP` porque el ESP va dentro de esa imagen y QEMU debe verificar el arranque. Para `fallback_file`, busca el cargador EFI en el árbol ISO.
 7. Extrae a temporal el archivo de configuración Syslinux/GRUB por modo y exige el parámetro `console=<serial_device>` antes de usar marcadores serie. Si falta, el arranque QEMU queda `BLOCKED` en vez de consumir el timeout sin una consola observable.

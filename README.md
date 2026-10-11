@@ -6,8 +6,8 @@ Herramientas de validación estática y pruebas de humo QEMU para ISOs reales de
 
 ## Qué comprueba
 
-- Archivo normal, presente, no vacío y de 64 MiB a 16 GiB; SHA-256 calculado.
-- Firma del descriptor primario ISO9660 (`CD001`, bloque lógico 16); `xorriso` examina el catálogo El Torito, el área de sistema y el árbol de archivos.
+- Archivo normal, presente, no vacío y de 64 MiB a 16 GiB; en descargas valida `Content-Length` y que el tamaño declarado por ISO9660 quepa en el archivo; SHA-256 calculado.
+- Descriptor primario ISO9660 (`CD001`, bloque lógico 16) con tamaños dual-endian coherentes; `xorriso` examina el catálogo El Torito, el área de sistema y el árbol de archivos.
 - Modos de arranque respaldados por el perfil: BIOS/Syslinux y UEFI/GRUB en x86_64; UEFI/GRUB en aarch64. Verifica el mecanismo UEFI declarado (incluido El Torito embebido) y requiere que la configuración de cada modo pase `console=<serial_device>` antes de confiar en marcadores por serie.
 - Si se aporta un checksum de referencia confiable, compara el hash; si no, informa `SKIP` (no convierte el hash calculado en verificación de autenticidad).
 - QEMU sin NIC, sin discos persistentes, en TCG; prueba cada modo declarado y solo aprueba al observar el marcador systemd configurado en la consola serie. El timeout sin marcador es `FAIL`.
@@ -76,7 +76,7 @@ python3 scripts/iso_tests.py --iso-url 'https://servidor/imagen.iso' --allow-unv
   --profile x86_64-niri --report-dir artifacts/unverified
 ```
 
-En este modo se calcula y registra SHA-256 pero `published_checksum` queda `SKIP`. La URL debe ser HTTPS, no puede incluir credenciales, las redirecciones deben permanecer en el mismo host HTTPS y la descarga temporal se elimina al terminar. Límite de tamaño: 16 GiB.
+En este modo se calcula y registra SHA-256 pero `published_checksum` queda `SKIP`; el hash calculado no autentica el archivo. La URL debe ser HTTPS, no puede incluir credenciales, las redirecciones deben permanecer en el mismo host HTTPS y la descarga falla si el cuerpo no coincide con `Content-Length`. También se valida que el tamaño del volumen ISO declarado quepa en el archivo. La descarga temporal se elimina al fallar. Límite: 16 GiB.
 
 ### Firmware UEFI no detectado
 
