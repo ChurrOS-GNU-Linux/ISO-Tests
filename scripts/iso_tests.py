@@ -149,6 +149,15 @@ def load_profiles(path: Path = DEFAULT_PROFILES) -> dict[str, Any]:
                 re.compile(pattern)
             except (TypeError, re.error) as e:
                 raise ValueError(f"profile {name!r}: invalid success pattern: {e}") from e
+        login_patterns = p.get("login_prompt_patterns", [])
+        if not isinstance(login_patterns, list) or any(not isinstance(pattern, str) or not pattern
+                                                       for pattern in login_patterns):
+            raise ValueError(f"profile {name!r}: login_prompt_patterns must be a list of non-empty strings")
+        for pattern in login_patterns:
+            try:
+                re.compile(pattern)
+            except re.error as e:
+                raise ValueError(f"profile {name!r}: invalid login prompt pattern: {e}") from e
     installer = data.get("installer_payload")
     if installer is not None:
         if not isinstance(installer, dict):
@@ -666,6 +675,20 @@ def _qemu_args(profile: dict[str, Any], mode: str, iso: Path, serial_log: Path,
     return common
 
 
+def _record_login_prompt_evidence(serial_text: str, profile_name: str, profile: dict[str, Any], mode: str,
+                                  reporter: Reporter, started: float, serial_log: Path) -> str | None:
+    for raw_pattern in profile.get("login_prompt_patterns", []):
+        match = re.search(raw_pattern, serial_text, re.I)
+        if match:
+            prompt = match.group(0).strip()
+            reporter.add(
+                f"qemu_login_prompt_{profile['architecture']}_{mode}", "PASS",
+                f"Observed serial login prompt {prompt!r}; this is progress evidence only and does not satisfy the configured systemd boot criterion",
+                started, serial_log)
+            return prompt
+    return None
+
+
 def run_boot_test(iso: Path, profile_name: str, profile: dict[str, Any], mode: str,
                   reporter: Reporter, timeout: float, firmware_args: tuple[str | None, str | None]) -> None:
     test_name = f"qemu_boot_{profile['architecture']}_{mode}"
@@ -715,7 +738,12 @@ def run_boot_test(iso: Path, profile_name: str, profile: dict[str, Any], mode: s
                 if any(p.search(serial_text) for p in patterns):
                     detected = "boot marker recorded before QEMU exited"
                     break
-                reporter.add(test_name, "FAIL", f"QEMU exited before a boot-success marker (exit {proc.returncode})", started, qemu_log)
+                login_prompt = _record_login_prompt_evidence(
+                    serial_text, profile_name, profile, mode, reporter, started, serial_log)
+                reason = f"QEMU exited before a boot-success marker (exit {proc.returncode})"
+                if login_prompt:
+                    reason += f"; observed serial login prompt {login_prompt!r}, which does not satisfy the configured systemd boot criterion"
+                reporter.add(test_name, "FAIL", reason, started, qemu_log)
                 return
             serial_text = serial_log.read_text(encoding="utf-8", errors="replace") if serial_log.exists() else ""
             for pattern in patterns:
@@ -732,7 +760,13 @@ def run_boot_test(iso: Path, profile_name: str, profile: dict[str, Any], mode: s
             _kill_process_group(proc)
             if qemu_stream:
                 qemu_stream.flush()
-            reporter.add(test_name, "FAIL", f"timeout after {timeout:g}s without a configured systemd boot marker", started, serial_log if serial_log.exists() else qemu_log)
+            serial_text = serial_log.read_text(encoding="utf-8", errors="replace") if serial_log.exists() else ""
+            login_prompt = _record_login_prompt_evidence(
+                serial_text, profile_name, profile, mode, reporter, started, serial_log)
+            reason = f"timeout after {timeout:g}s without a configured systemd boot marker"
+            if login_prompt:
+                reason += f"; observed serial login prompt {login_prompt!r}, which is progress evidence but does not meet the boot criterion"
+            reporter.add(test_name, "FAIL", reason, started, serial_log if serial_log.exists() else qemu_log)
             return
         reporter.add(test_name, "PASS", f"serial boot criterion observed: {detected}", started, serial_log)
     except OSError as e:

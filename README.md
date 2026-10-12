@@ -10,7 +10,7 @@ Herramientas de validación estática y pruebas de humo QEMU para ISOs reales de
 - Descriptor primario ISO9660 (`CD001`, bloque lógico 16) con tamaños dual-endian coherentes; `xorriso` examina el catálogo El Torito, el área de sistema y el árbol de archivos.
 - Modos de arranque respaldados por el perfil: BIOS/Syslinux y UEFI/GRUB en x86_64; UEFI/GRUB en aarch64. Verifica el mecanismo UEFI declarado (incluido El Torito embebido) y requiere que la configuración de cada modo pase `console=<serial_device>` antes de confiar en marcadores por serie.
 - Si se aporta un checksum de referencia confiable, compara el hash; si no, informa `SKIP` (no convierte el hash calculado en verificación de autenticidad).
-- QEMU sin NIC, sin discos persistentes, en TCG; prueba cada modo declarado y solo aprueba al observar el marcador systemd configurado en la consola serie. El timeout sin marcador es `FAIL`.
+- QEMU sin NIC, sin discos persistentes, en TCG; prueba cada modo declarado y solo aprueba al observar el marcador systemd configurado en la consola serie. Si se observa un prompt de login configurado sin dicho marcador, se registra como evidencia auxiliar `PASS`, pero el arranque sigue `FAIL`; el prompt no rebaja el criterio.
 - Con `--check-installer`, extrae el SquashFS y verifica el binario, lanzador y configuración de Calamares; esto no ejecuta la GUI ni realiza una instalación.
 - Informe JSON, salida de herramientas y logs serie/QEMU con estados `PASS`, `FAIL`, `SKIP` y `BLOCKED`.
 

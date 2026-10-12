@@ -37,7 +37,8 @@
         "systemd\\[[0-9]+\\]: Reached target Graphical Interface\\.",
         "systemd\\[[0-9]+\\]: Reached target Multi-User System\\."
       ],
-      "notes": "Niri live desktop; serial marker validates systemd reaching a boot target, not visual desktop usability."
+      "login_prompt_patterns": ["churros login:"],
+      "notes": "Niri live desktop; the login prompt is progress evidence only; success still requires the configured systemd boot marker."
     },
     "x86_64-xfce": {
       "architecture": "x86_64",

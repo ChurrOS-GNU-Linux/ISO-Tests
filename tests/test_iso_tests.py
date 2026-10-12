@@ -175,6 +175,7 @@ class Harness(unittest.TestCase):
             "x86_64-niri", "x86_64-xfce", "x86_64-kde", "x86_64-server"})
         self.assertEqual(p["aarch64-niri"]["boot_modes"], ["uefi"])
         self.assertEqual(p["aarch64-niri"]["efi_bootloader"], "BOOTAA64.EFI")
+        self.assertEqual(p["x86_64-niri"]["login_prompt_patterns"], ["churros login:"])
 
     def test_rejects_empty_profile_table_and_invalid_architecture(self):
         for data, text in [
@@ -185,6 +186,14 @@ class Harness(unittest.TestCase):
             path.write_text(json.dumps(data), encoding="utf-8")
             with self.assertRaisesRegex(ValueError, text):
                 it.load_profiles(path)
+
+    def test_invalid_login_prompt_regex_is_rejected(self):
+        data = it.load_profiles()
+        data["profiles"]["x86_64-niri"]["login_prompt_patterns"] = ["["]
+        path = self.root / "bad-login-pattern.json"
+        path.write_text(json.dumps(data), encoding="utf-8")
+        with self.assertRaisesRegex(ValueError, "invalid login prompt pattern"):
+            it.load_profiles(path)
 
     def test_rejects_bios_profile_on_aarch64(self):
         path = self.root / "bad-arm.json"
@@ -302,6 +311,15 @@ class Harness(unittest.TestCase):
         it.run_boot_test(self.iso, "x86_64-niri", self._qemu_profile(), "bios", self.reporter, 0.2, (None, None))
         self.assertEqual(self.reporter.tests[-1].status, "FAIL")
         self.assertIn("without a configured", self.reporter.tests[-1].message)
+
+    def test_qemu_login_prompt_is_reported_as_progress_not_boot_success(self):
+        self.fake_qemu("import sys,time\na=sys.argv\np=a[a.index('-serial')+1].split(':',1)[1]\nopen(p,'w').write('churros login: ')\ntime.sleep(10)\n")
+        it.run_boot_test(self.iso, "x86_64-niri", self._qemu_profile(), "bios", self.reporter, 0.2, (None, None))
+        by_name = {test.name: test for test in self.reporter.tests}
+        self.assertEqual(by_name["qemu_login_prompt_x86_64_bios"].status, "PASS")
+        self.assertIn("progress evidence only", by_name["qemu_login_prompt_x86_64_bios"].message)
+        self.assertEqual(by_name["qemu_boot_x86_64_bios"].status, "FAIL")
+        self.assertIn("does not meet the boot criterion", by_name["qemu_boot_x86_64_bios"].message)
 
     def test_qemu_error_exit_without_marker_is_failure(self):
         self.fake_qemu("import sys\nprint('emulator error')\nsys.exit(23)\n")
